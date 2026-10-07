@@ -1,0 +1,149 @@
+﻿ES-DE Sync for Android v1.4.7 Development
+======================================
+
+프로그램
+--------
+ES-DE Sync
+
+대상
+----
+USB ADB로 연결한 Android 기기
+
+원본
+----
+Dropbox의 ES-DE Sync 폴더
+
+선택된 시스템
+-------------
+Dropbox ES-DE Sync\roms 아래에 존재하는 1단계 시스템 폴더입니다.
+
+예:
+  roms\gb
+  roms\gbc
+
+이면 gb, gbc가 선택된 시스템입니다.
+
+완전 미러 범위
+--------------
+선택된 시스템에 한해서 다음 영역을 Dropbox와 동일하게 맞춥니다.
+
+- roms
+- gamelists
+- downloaded_media
+
+단, 각 시스템의 _TEST / _UNREGISTERED 폴더와 그 하위 내용은 완전히 제외합니다.
+
+예:
+  /storage/emulated/0/ROMs/gb/_TEST
+  /storage/emulated/0/ROMs/gb/_UNREGISTERED
+  /storage/emulated/0/ROMs/gbc/_TEST
+  /storage/emulated/0/ROMs/gbc/_UNREGISTERED
+
+_TEST / _UNREGISTERED 규칙
+----------
+- Android의 _TEST / _UNREGISTERED는 삭제하지 않음
+- Android의 _TEST / _UNREGISTERED 내부 파일도 삭제하지 않음
+- Dropbox의 _TEST / _UNREGISTERED는 복사하지 않음
+- Dropbox와 Android의 완전 미러 비교 대상에서 _TEST / _UNREGISTERED 전체 제외
+
+_TEST는 테스트 ROM용, _UNREGISTERED는 로컬 ROM 보관용 예약 공간입니다. 이번 버전은 자동 ROM 이관을 수행하지 않습니다.
+
+권장
+----
+Dropbox에는 _TEST / _UNREGISTERED 폴더를 만들지 않는 것을 권장합니다.
+
+정식 라이브러리:
+  Dropbox ES-DE Sync
+
+테스트 ROM:
+  Android 기기의 각 시스템/_TEST
+
+이렇게 역할을 분리하면 가장 깔끔합니다.
+
+동기화 전 안전 동작
+-------------------
+1. 포그라운드 앱 검사
+2. ES-DE / Android 홈 / System UI이면 진행
+3. 게임/에뮬레이터/다른 앱이 실행 중이면 동기화 차단
+4. 사전 검사 통과 후 ES-DE 종료
+5. 선택된 시스템 완전 미러링 (_TEST / _UNREGISTERED 제외)
+6. 완료 후 ES-DE 자동 재실행
+
+설치
+----
+install.cmd
+
+제거
+----
+uninstall.cmd
+
+설치 위치
+---------
+%LOCALAPPDATA%\ESDE-Sync
+
+로그
+----
+%LOCALAPPDATA%\ESDE-Sync\State\sync.log
+
+
+v1.4.3 수정
+-----------
+- sync.log를 GUI와 동기화 작업이 동시에 읽고 쓸 때 발생하던 파일 잠금 오류 수정
+- 로그 읽기/쓰기에 FileShare.ReadWrite 적용
+- 짧은 재시도 로직 추가
+- Dropbox 쪽에 _TEST가 없을 때 시스템 전체를 한 번의 adb push --sync로 처리하도록 성능 복원
+- Dropbox에 _TEST가 실수로 존재하면 해당 폴더만 제외하고 안전하게 동기화
+
+_TEST 보존 규칙은 그대로 유지됩니다.
+
+
+v1.4.4 수정
+-----------
+- ES-DE Sync 프로그램 창을 닫을 때 adb kill-server를 실행하도록 추가
+- 프로그램 종료 후 adb.exe 프로세스가 남지 않도록 정리
+- ADB 종료 실패가 있어도 프로그램 종료 자체는 막지 않음
+
+주의:
+동시에 다른 프로그램이 같은 ADB 서버를 사용 중이라면 그 연결도 끊길 수 있습니다.
+
+v1.4.5 개발 버전
+----------------
+- 두 예약 폴더와 하위를 비교/삭제/전송에서 제외하며 내부를 탐색하지 않습니다.
+- ROM 원본 시스템 폴더가 사라지면 예약 폴더를 남기고 일반 파일과 빈 폴더만 정리합니다.
+- 삭제 전 허용 Android 루트와 현재 선택 시스템 범위를 검증합니다.
+- 원격 파일/폴더 목록 조회가 모두 성공한 뒤 삭제하며 조회 오류 시 중단합니다.
+- v1.4.5에서는 ReparsePoint 원본을 모두 차단했습니다. v1.4.6에서 아래 방식으로 개선했습니다.
+- SHA-256 ROM 채택, gamelist.xml 병합, Pocket Air Mini foreground 개선은 아직 없습니다.
+- Android에만 있는 일반 ROM은 기존처럼 삭제됩니다. 예약 ROM의 gamelist 항목은 아직 보존되지 않습니다.
+- 실제 기기 검증 전 개발 버전입니다.
+정적 모의 검증:
+  powershell.exe -NoProfile -File .\tests\safety-static.ps1
+실제 ADB를 호출하지 않고 임시 폴더의 모의 파일만 사용합니다.
+
+v1.4.6 개발 버전
+----------------
+- Windows reparse tag의 이름 대체 비트를 검사하여 symbolic link/junction/mount point를 차단합니다.
+- 루트와 상위 폴더도 검사하며, 핸들의 실제 최종 경로가 원본과 일치해야 합니다.
+- 일반 파일과 로컬 읽기가 가능한 비링크 reparse 파일을 허용합니다. Dropbox 전용 이름 판정은 없습니다.
+- Offline/Recall 속성의 placeholder와 읽기 실패 파일은 삭제 전에 차단합니다. 다운로드/수정은 요청하지 않습니다.
+- 모든 선택 원본을 먼저 검증하며 파일 전체를 읽어 읽기 실패를 확인합니다. 대용량 원본에서는 검사 시간이 늘어납니다.
+- worker가 ES-DE를 종료한 경우 finally에서 성공/실패와 관계없이 재실행을 한 번 시도합니다.
+- preflight 실패 시 재실행하지 않으며, 재실행 실패로 원래 동기화 오류를 덮지 않습니다.
+- 예약 폴더, 삭제 범위, 원격 조회 실패 안전장치는 유지합니다.
+- SHA-256 채택, gamelist 병합, Pocket Air Mini foreground 개선은 아직 없습니다.
+- 실제 Android 검증 전 개발 버전입니다.
+
+추가 모의 검증:
+  powershell.exe -NoProfile -File .\tests\local-recovery-static.ps1
+v1.4.7 개발 버전
+----------------
+- 원격 find 식에서 -mindepth를 제거하고 예약 이름 prune와 파일/폴더 종류만 판정합니다.
+- 폴더 조회 결과의 정확한 시스템 시작점만 제외합니다. 다른 범위 오류는 계속 차단합니다.
+- -print0/NUL 구분으로 공백, 괄호, 따옴표 등을 포함한 이름을 분리합니다.
+- 제어문자/줄바꿈이 있는 경로, 예약 경로 출력, NUL 종료가 없는 결과는 안전을 위해 차단합니다.
+- ADB 실패와 stderr 오류는 빈 목록으로 취급하지 않습니다.
+- Dropbox 처리, ES-DE 복구, foreground 및 예약 정책은 변경하지 않습니다.
+- 실제 Android 검증 전 개발 버전입니다.
+
+원격 열거 모의 검증:
+  powershell.exe -NoProfile -File .\tests\remote-entries-static.ps1

@@ -1,0 +1,21 @@
+# Local device test reports, backups, snapshots and fixtures
+/reports/
+
+# Runtime state and logs
+/State/
+/platform-tools/
+/config.json
+*.log
+status.json
+sync.log
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*~
+android-only-delete-test.txt
+dropbox-sync-test.txt
+keep-test*.txt
+keep-unregistered*.txt
+source-should-not-copy.txt
