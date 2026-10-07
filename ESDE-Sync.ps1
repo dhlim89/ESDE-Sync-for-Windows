@@ -513,6 +513,11 @@ if ($config.SourceRoot -and (Test-Path $config.SourceRoot)) {
 }
 
 $form.Add_Shown({
+    # 콘솔과 Forms 창을 구분해 바로가기의 Hidden 옵션에서도 메인 창을 표시한다.
+    Initialize-GuiWindowApi
+    $console = [EsdeSync.WindowApi]::GetConsoleWindow()
+    if ($console -ne [IntPtr]::Zero) { [void][EsdeSync.WindowApi]::ShowWindow($console,0) }
+    [void][EsdeSync.WindowApi]::ShowWindow($form.Handle,5)
     Refresh-Devices
     if ($UpdateSession) { Write-GuiConfirmation $UpdateSession $AppRoot $UpdateSessionId $AppVersion.version $ConfirmationFile }
     try { Start-UpdateTask 'check' $null } catch { $updateLabel.Text = '업데이트 확인 실패: ' + $_.Exception.Message }

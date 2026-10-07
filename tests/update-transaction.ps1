@@ -1,4 +1,4 @@
-﻿# 실제 설치/GUI/Android를 사용하지 않는다. 파일 이동은 임시 루트에서 실제 수행한다.
+﻿# 실제 설치본/사용자 GUI/Android는 사용하지 않는다. 별도 테스트 Forms 프로세스만 실행한다. 파일 이동은 임시 루트에서 실제 수행한다.
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'update-common.ps1')
@@ -6,13 +6,24 @@ $repo=Split-Path -Parent $PSScriptRoot
 $sandbox=Join-Path ([IO.Path]::GetTempPath()) ('esde-transaction-test-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $sandbox | Out-Null
 $script:Passed=0; $script:Fault=''; $script:FakeId=100000; $script:FakeProcesses=@{}; $script:Launches=0
-$nativeMove=${function:Move-UpdateDirectory}; $nativeProcess=${function:Get-UpdateProcess}
+$nativeWindows=${function:Get-GuiWindows}; $nativeMove=${function:Move-UpdateDirectory}; $nativeProcess=${function:Get-UpdateProcess}
 function Check($value,[string]$name) { if(-not $value){throw "검증 실패: $name"}; $script:Passed++; Write-Output "PASS: $name" }
 function Reject([string]$name,[scriptblock]$Work) { $blocked=$false; try { & $Work | Out-Null } catch {$blocked=$true}; Check $blocked $name }
 function Assert-NoAppProcesses { param($AppRoot,[switch]$IncludeGui) if($script:Fault -eq 'sync-running'){throw '모의 sync worker 실행 중'} }
 function Get-UpdateProcess([int]$ProcessId) {
     if($script:FakeProcesses.ContainsKey($ProcessId)){return $script:FakeProcesses[$ProcessId]}
     return (& $nativeProcess $ProcessId)
+}
+function Get-GuiWindows([int]$ProcessId) {
+    if (-not $script:FakeProcesses.ContainsKey($ProcessId)) { return (& $nativeWindows $ProcessId) }
+    if ($script:Fault -eq 'no-window') { return }
+    $owner=$ProcessId; $visible=$true; $title='ES-DE Sync v1.4.9'
+    if ($script:Fault -eq 'wrong-window-pid') { $owner++ }
+    if ($script:Fault -eq 'hidden-window') { $visible=$false }
+    if ($script:Fault -eq 'wrong-title') { $title='unexpected' }
+    # 롤백 창은 이전 버전 제목을 사용한다.
+    if ($script:FakeProcesses[$ProcessId].PSObject.Properties['version']) { $title='ES-DE Sync v'+$script:FakeProcesses[$ProcessId].version }
+    return [pscustomobject]@{Pid=$owner;Handle=123;Visible=$visible;Title=$title}
 }
 function Stop-UpdateGui($State) { if($State.newGuiPid -gt 0){$script:FakeProcesses.Remove([int]$State.newGuiPid)} }
 function Start-UpdateGui { param($AppRoot,$SessionPath,$Version,[switch]$Rollback)
@@ -21,6 +32,7 @@ function Start-UpdateGui { param($AppRoot,$SessionPath,$Version,[switch]$Rollbac
     if($Rollback -and $script:Fault -eq 'rollback-launch'){throw '모의 이전 GUI 실행 실패'}
     $script:FakeId++
     $process=[pscustomobject]@{pid=$script:FakeId;startTime=(Get-Date).ToUniversalTime().ToString('o');confirmation=(Test-GuiConfirmationSupport (Join-Path $AppRoot 'App\ESDE-Sync.ps1'))}
+    if ($Rollback) { $script:Fault=''; $process | Add-Member version $Version }
     $script:FakeProcesses[$process.pid]=$process
     if(-not $Rollback -and $script:Fault -eq 'exit'){ $script:FakeProcesses.Remove($process.pid); return $process }
     if($process.confirmation -and ($Rollback -or $script:Fault -ne 'no-confirmation')) {
@@ -84,7 +96,7 @@ Check (Test-Path (Join-Path $f.Session 'backup\App')) '성공 후 원본 백업 
 Check-Preserved $f
 $launchCount=$script:Launches; $result=Invoke-UpdateTransaction $f.Root $f.Session -TimeoutSeconds 0
 Check ($result.state -eq 'completed' -and $script:Launches -eq $launchCount) 'completed 재실행은 중복 적용하지 않음'
-foreach($fault in @('missing','locked','backup','staged','launch','no-confirmation','wrong-session','wrong-version','wrong-pid','wrong-start','exit','post-missing','sync-running','target-mismatch','gui-exit')) {
+foreach($fault in @('missing','locked','backup','staged','launch','no-confirmation','wrong-session','wrong-version','wrong-pid','wrong-start','exit','post-missing','sync-running','target-mismatch','gui-exit','no-window','hidden-window','wrong-window-pid','wrong-title')) {
     $f=New-Fixture $fault; $script:Fault=$fault; $lock=$null
     if($fault -eq 'missing'){Remove-Item -LiteralPath (Join-Path $f.Session 'staged\App\update-worker.ps1')}
     if($fault -eq 'locked'){$lock=[IO.File]::Open((Join-Path $f.Root 'App\old-data.txt'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)}
@@ -96,6 +108,9 @@ foreach($fault in @('missing','locked','backup','staged','launch','no-confirmati
     }
     try {$result=Invoke-UpdateTransaction $f.Root $f.Session -TimeoutSeconds 0} finally {if($lock){$lock.Dispose()}}
     Check ($result.state -eq 'failed' -and $result.originalError) ($fault+' 실패 기록/원본 복구')
+    if ($fault -in @('no-window','hidden-window','wrong-window-pid','wrong-title')) {
+        Check ($result.originalError -match '가시적인 메인 창' -and $result.rollbackGuiPid -gt 0 -and -not $result.rollbackError) ($fault+' 시작 실패 후 이전 GUI 재실행/롤백 성공')
+    }
     Assert-AppSnapshot (Join-Path $f.Root 'App') $f.Original $f.Root
     Check-Preserved $f
 }
@@ -181,7 +196,7 @@ try {
 Check ($child.Code -ne 0) '실제 update-worker 중복 실행 차단'
 Check ((Read-UpdateJson (Join-Path $f.Session 'state.json')).state -eq 'verified') '중복 worker가 기존 세션 상태를 바꾸지 않음'
 
-# 로컬 더미 프로세스를 사용한 실제 실행기/시작 확인 통합 검증. Windows Forms/ADB는 없다.
+# 임시 설치본과 테스트 Forms를 사용하는 실행기/시작 확인 통합 검증. 실제 ADB는 없다.
 $nativePayload=Join-Path $sandbox 'native-payload'
 Copy-Item -LiteralPath $payload -Destination $nativePayload -Recurse
 $dummyGui=@'
@@ -191,8 +206,11 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'update-transaction.ps1')
 $gui=Enter-AppMutex $InstallRoot 'gui'
 try {
-    Write-GuiConfirmation $UpdateSession $InstallRoot $UpdateSessionId (Get-AppVersion (Join-Path $PSScriptRoot 'version.json')).version $ConfirmationFile
-    while($true){Start-Sleep -Milliseconds 100}
+    Add-Type -AssemblyName System.Windows.Forms
+    $form=New-Object Windows.Forms.Form
+    $form.Text='ES-DE Sync v'+(Get-AppVersion (Join-Path $PSScriptRoot 'version.json')).version
+    $form.Add_Shown({ Write-GuiConfirmation $UpdateSession $InstallRoot $UpdateSessionId (Get-AppVersion (Join-Path $PSScriptRoot 'version.json')).version $ConfirmationFile })
+    [void]$form.ShowDialog()
 }
 finally { Exit-AppMutex $gui }
 '@
@@ -279,5 +297,50 @@ $stopFn=$guiAst.Find({param($n)$n -is [Management.Automation.Language.FunctionDe
 $oldAdb=$script:Adb; $script:Adb=$fakeAdb
 try {Stop-AdbServer;Check ([IO.File]::ReadAllText($recordPath) -ceq 'kill-server') 'GUI 종료 ADB 경로/kill-server 인수(가짜 실행 파일)'}
 finally {$script:Adb=$oldAdb;$env:ESDE_TEST_ADB_ARGUMENTS=$oldEnv}
+# 실제 Windows API로 별도 테스트 Forms 프로세스의 창 상태를 확인한다.
+$windowProbe=Join-Path $sandbox 'window-probe.ps1'
+$probeSource=@'
+param($Mode,$Ready,$Transaction)
+Add-Type -AssemblyName System.Windows.Forms
+$form=New-Object Windows.Forms.Form
+$form.Text=if($Mode -eq 'wrong-title'){'wrong title'}else{'ES-DE Sync v1.4.8'}
+if($Mode -eq 'no-window') {
+    [IO.File]::WriteAllText($Ready,'ready')
+    while($true){Start-Sleep -Milliseconds 100}
+}
+if($Mode -eq 'hidden') {
+    [void]$form.Handle
+    [IO.File]::WriteAllText($Ready,'ready')
+    [Windows.Forms.Application]::Run()
+} else {
+    $form.Add_Shown({
+        if($Mode -eq 'launch-hidden-fixed'){
+            . $Transaction
+            Initialize-GuiWindowApi
+            $console=[EsdeSync.WindowApi]::GetConsoleWindow()
+            if($console -ne [IntPtr]::Zero){[void][EsdeSync.WindowApi]::ShowWindow($console,0)}
+            [void][EsdeSync.WindowApi]::ShowWindow($form.Handle,5)
+        }
+        [IO.File]::WriteAllText($Ready,'ready')
+    })
+    [void]$form.ShowDialog()
+}
+'@
+[IO.File]::WriteAllText($windowProbe,$probeSource,(New-Object Text.UTF8Encoding($true)))
+foreach($mode in @('visible','hidden','no-window','wrong-title','launch-hidden','launch-hidden-fixed')) {
+    $readyFile=Join-Path $sandbox ('window-'+$mode+'.ready')
+    $arguments='-NoProfile -File "'+$windowProbe+'" -Mode '+$mode+' -Ready "'+$readyFile+'" -Transaction "'+$transaction+'"'
+    $style=if($mode -in @('launch-hidden','launch-hidden-fixed')){'Hidden'}else{'Normal'}
+    $probeProcess=Start-Process powershell.exe -ArgumentList $arguments -WindowStyle $style -PassThru
+    try {
+        $watch=[Diagnostics.Stopwatch]::StartNew()
+        while(-not(Test-Path $readyFile)){if($probeProcess.HasExited -or $watch.Elapsed.TotalSeconds -gt 10){throw '창 probe 시작 실패'};Start-Sleep -Milliseconds 100}
+        $windows=@(& $nativeWindows $probeProcess.Id)
+        $visible=Test-VisibleGuiWindow $probeProcess.Id '1.4.8'
+        Check ($visible -eq ($mode -in @('visible','launch-hidden-fixed'))) ('실제 EnumWindows/IsWindowVisible: '+$mode)
+        if($mode -in @('hidden','launch-hidden')){Check (@($windows|Where-Object {$_.Title -ceq 'ES-DE Sync v1.4.8' -and -not $_.Visible}).Count -eq 1) '실제 숨김 메인 창 존재 확인'}
+    }
+    finally {if(-not $probeProcess.HasExited){Stop-Process -Id $probeProcess.Id}}
+}
 Write-Output ("트랜잭션 검증 완료: $script:Passed 항목 / PowerShell "+$PSVersionTable.PSVersion)
 Write-Output "임시 설치 루트: $sandbox"

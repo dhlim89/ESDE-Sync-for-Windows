@@ -229,6 +229,53 @@ function Move-UpdateDirectory([string]$Source, [string]$Destination, [string]$Ap
     [IO.Directory]::Move($Source,$Destination)
 }
 
+# PID 소유의 실제 top-level 창을 검사한다.
+function Initialize-GuiWindowApi {
+    if ('EsdeSync.WindowApi' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+namespace EsdeSync {
+    public class WindowInfo { public long Handle; public int Pid; public bool Visible; public string Title; }
+    public static class WindowApi {
+        private delegate bool Callback(IntPtr window, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(Callback callback, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+        [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+        public static WindowInfo[] Find(int pid) {
+            var windows = new List<WindowInfo>();
+            Callback callback = delegate(IntPtr window, IntPtr parameter) {
+                uint owner; GetWindowThreadProcessId(window, out owner);
+                if (owner == pid) {
+                    var text = new StringBuilder(512); GetWindowText(window, text, text.Capacity);
+                    windows.Add(new WindowInfo { Handle=window.ToInt64(), Pid=(int)owner, Visible=IsWindowVisible(window), Title=text.ToString() });
+                }
+                return true;
+            };
+            if (!EnumWindows(callback, IntPtr.Zero)) throw new InvalidOperationException("EnumWindows failed");
+            return windows.ToArray();
+        }
+    }
+}
+"@
+}
+
+function Get-GuiWindows([int]$ProcessId) {
+    Initialize-GuiWindowApi
+    return [EsdeSync.WindowApi]::Find($ProcessId)
+}
+
+function Test-VisibleGuiWindow([int]$ProcessId, [string]$Version) {
+    return @((Get-GuiWindows $ProcessId) | Where-Object {
+        $_.Pid -eq $ProcessId -and $_.Handle -ne 0 -and $_.Visible -and $_.Title -ceq ('ES-DE Sync v'+$Version)
+    }).Count -gt 0
+}
+
 function Start-UpdateGui([string]$AppRoot, [string]$SessionPath, [string]$Version, [switch]$Rollback) {
     $script = Join-Path $AppRoot 'App\ESDE-Sync.ps1'
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$script+'"'))
@@ -239,7 +286,8 @@ function Start-UpdateGui([string]$AppRoot, [string]$SessionPath, [string]$Versio
     elseif ([IO.Path]::GetFullPath($AppRoot).TrimEnd('\') -ine (Join-Path $env:LOCALAPPDATA 'ESDE-Sync')) {
         throw '이전 GUI는 사용자 지정 설치 루트의 재실행을 지원하지 않습니다. 원본 App은 복원되어 있습니다.'
     }
-    $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList ($arguments -join ' ') -WindowStyle Hidden -PassThru
+    # GUI에는 SW_HIDE를 전달하지 않는다. 콘솔은 GUI 초기화에서 별도로 숨긴다.
+    $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList ($arguments -join ' ') -WindowStyle Normal -PassThru
     return [pscustomobject]@{pid=$process.Id;startTime=$process.StartTime.ToUniversalTime().ToString('o');confirmation=(Test-GuiConfirmationSupport $script)}
 }
 
@@ -264,11 +312,11 @@ function Wait-GuiConfirmation([string]$SessionPath, $Process, [string]$Version, 
             if ($confirmation.sessionId -cne (Split-Path $SessionPath -Leaf) -or $confirmation.version -cne $Version -or
                 $confirmation.pid -ne $Process.pid -or $confirmation.processStartTime -cne $Process.startTime -or
                 -not $confirmation.confirmedAt) { throw 'GUI 시작 확인 정보 불일치' }
-            return
+            if (Test-VisibleGuiWindow $Process.pid $Version) { return }
         }
         Start-Sleep -Milliseconds 100
     } while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
-    throw 'GUI 시작 확인 시간 초과'
+    throw 'GUI 시작 확인 시간 초과: 해당 PID의 가시적인 메인 창과 버전 제목이 필요합니다.'
 }
 
 function Write-GuiConfirmation([string]$SessionPath, [string]$AppRoot, [string]$SessionId, [string]$Version, [string]$FileName) {
@@ -303,9 +351,16 @@ function Invoke-UpdateRollback([string]$AppRoot, [string]$SessionPath, $State, [
         $State.rollbackGuiPid=$old.pid; $State.rollbackGuiStartTime=$old.startTime
         if ($old.confirmation) { Wait-GuiConfirmation $SessionPath $old $State.sourceVersion 'rollback-confirmation.json' $TimeoutSeconds }
         else {
-            Start-Sleep -Milliseconds 250
+            $watch=[Diagnostics.Stopwatch]::StartNew()
+            do {
+                $alive=Get-UpdateProcess $old.pid
+                if (-not $alive -or $alive.startTime -cne $old.startTime) { throw '이전 GUI 재실행 실패' }
+                if (Test-VisibleGuiWindow $old.pid $State.sourceVersion) { break }
+                Start-Sleep -Milliseconds 100
+            } while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+            if (-not (Test-VisibleGuiWindow $old.pid $State.sourceVersion)) { throw '이전 GUI의 가시적인 메인 창 확인 시간 초과' }
             if (-not (Get-UpdateProcess $old.pid)) { throw '이전 GUI 재실행 실패' }
-            Write-UpdateLog $SessionPath '이전 v1.4.7/1차 GUI: 원본 파일 복원 및 실행 프로세스 확인(시작 확인 기능 없음)'
+            Write-UpdateLog $SessionPath '이전 v1.4.7/1차 GUI: 원본 파일 복원 및 가시적인 창 확인(시작 확인 기능 없음)'
         }
     }
     Set-UpdateState $SessionPath $State 'failed'
