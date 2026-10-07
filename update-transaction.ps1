@@ -111,10 +111,84 @@ function Assert-NoAppProcesses([string]$AppRoot, [switch]$IncludeGui) {
     if ($IncludeGui) { $paths += Join-Path $AppRoot 'App\ESDE-Sync.ps1' }
     foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop)) {
         if (-not $process.CommandLine) { throw 'PowerShell 프로세스 명령행을 확인할 수 없어 교체를 중단합니다.' }
+        if ($IncludeGui -and $process.CommandLine.IndexOf((Join-Path $AppRoot 'App\'),[StringComparison]::OrdinalIgnoreCase) -ge 0) { throw ('App 경로를 참조하는 PowerShell이 아직 실행 중입니다: PID '+$process.ProcessId) }
         foreach ($path in $paths) {
             if ($process.CommandLine -and $process.CommandLine.IndexOf($path,[StringComparison]::OrdinalIgnoreCase) -ge 0) { throw '설치 루트의 GUI/sync worker가 아직 실행 중입니다.' }
         }
     }
+}
+
+function Get-AppProcessDirectory([int]$ProcessId) {
+    if (-not ('EsdeAppProcessDirectory' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class EsdeAppProcessDirectory {
+ [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+ [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool ReadProcessMemory(IntPtr process,IntPtr address,byte[] data,IntPtr size,out IntPtr read);
+ [DllImport("kernel32.dll")] static extern bool IsWow64Process(IntPtr process,out bool wow64);
+ [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process,int info,IntPtr[] data,int size,out int returned);
+ [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool DuplicateHandle(IntPtr sourceProcess,IntPtr sourceHandle,IntPtr targetProcess,out IntPtr targetHandle,uint access,bool inherit,uint options);
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern uint GetFinalPathNameByHandle(IntPtr handle,StringBuilder path,uint count,uint flags);
+ static byte[] Read(IntPtr p,long a,int n){var b=new byte[n];IntPtr read;if(!ReadProcessMemory(p,new IntPtr(a),b,new IntPtr(n),out read)||read.ToInt64()!=n)throw new Exception("ReadProcessMemory error "+Marshal.GetLastWin32Error());return b;}
+ public static string[] Inspect(int pid){
+  if(IntPtr.Size!=8)throw new Exception("64-bit diagnostic required");
+  IntPtr p=OpenProcess(0x410|0x40,false,pid);if(p==IntPtr.Zero)throw new Exception("OpenProcess error "+Marshal.GetLastWin32Error());
+  try{
+   bool wow;if(!IsWow64Process(p,out wow))throw new Exception("IsWow64Process failed");
+   var info=new IntPtr[6];int size;int status=NtQueryInformationProcess(p,0,info,48,out size);if(status!=0)throw new Exception("NtQueryInformationProcess "+status);
+   long peb=info[1].ToInt64(); if(wow){var wi=new IntPtr[1];status=NtQueryInformationProcess(p,26,wi,8,out size);if(status!=0)throw new Exception("Wow64 PEB query failed");peb=wi[0].ToInt64();} long parameters=wow?BitConverter.ToUInt32(Read(p,peb+0x10,4),0):BitConverter.ToInt64(Read(p,peb+0x20,8),0);
+   var unicode=Read(p,parameters+(wow?0x24:0x38),wow?8:16);int length=BitConverter.ToUInt16(unicode,0);long buffer=wow?BitConverter.ToUInt32(unicode,4):BitConverter.ToInt64(unicode,8);
+   string cwd=Encoding.Unicode.GetString(Read(p,buffer,length));
+   long raw=wow?BitConverter.ToUInt32(Read(p,parameters+0x2c,4),0):BitConverter.ToInt64(Read(p,parameters+0x48,8),0);IntPtr copy;string handlePath="";
+   if(DuplicateHandle(p,new IntPtr(raw & ~3L),GetCurrentProcess(),out copy,0,false,2)){
+    try{var path=new StringBuilder(32768);uint n=GetFinalPathNameByHandle(copy,path,(uint)path.Capacity,0);handlePath=n>0?path.ToString():"GetFinalPath error "+Marshal.GetLastWin32Error();}finally{CloseHandle(copy);}
+   }else{handlePath="DuplicateHandle error "+Marshal.GetLastWin32Error();}
+   return new string[]{cwd,"0x"+raw.ToString("X"),handlePath};
+  }finally{CloseHandle(p);}
+ }
+}
+"@
+    }
+    return [EsdeAppProcessDirectory]::Inspect($ProcessId)[0]
+}
+
+function Assert-AppDirectoryReleased([string]$AppRoot) {
+    $app=[IO.Path]::GetFullPath((Join-Path $AppRoot 'App')).TrimEnd('\')
+    foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe' OR Name='adb.exe'" -ErrorAction Stop)) {
+        try { $cwd=(Get-AppProcessDirectory $process.ProcessId).TrimEnd('\') }
+        catch {
+            if (-not (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) { continue }
+            throw ('프로세스 작업 디렉터리 확인 실패: PID '+$process.ProcessId+' '+$_.Exception.Message)
+        }
+        if ($cwd -ieq $app -or $cwd.StartsWith($app+'\',[StringComparison]::OrdinalIgnoreCase)) {
+            throw ('App 디렉터리 핸들 보유 가능: PID '+$process.ProcessId+' '+$process.Name+' CurrentDirectory='+$cwd)
+        }
+    }
+}
+
+function Wait-AppDirectoryReleased([string]$AppRoot,[string]$SessionPath,[int]$TimeoutMilliseconds=10000) {
+    $log={param($message) Write-UpdateLog $SessionPath $message}
+    # 실행 중 동기화가 있으면 ADB 종료를 먼저 시도하지 않는다.
+    Assert-NoAppProcesses $AppRoot -IncludeGui
+    Write-UpdateLog $SessionPath 'GUI 프로세스 종료 / sync worker 및 App PowerShell 부재 확인'
+    $watch=[Diagnostics.Stopwatch]::StartNew();$lastError=$null
+    Stop-AppAdbServer (Join-Path $AppRoot 'platform-tools\adb.exe') $AppRoot $TimeoutMilliseconds $log
+    do {
+        try {
+            Assert-NoAppProcesses $AppRoot -IncludeGui
+            $servers=@(Get-AdbServerProcesses)
+            if ($servers.Count) { throw ('ADB 서버가 다시 실행됨: PID '+($servers.ProcessId -join ',')) }
+            Assert-AppDirectoryReleased $AppRoot
+            Write-UpdateLog $SessionPath 'App 교체 직전 잠금 해제 확인: GUI/sync/App PowerShell/ADB 서버 없음, App CurrentDirectory 보유 프로세스 없음'
+            return
+        }
+        catch { $lastError=$_; Start-Sleep -Milliseconds 100 }
+    } while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    throw ('App 잠금 해제 확인 시간 초과: '+$lastError.Exception.Message)
 }
 
 function Get-AppSnapshot([string]$AppPath, [string]$AppRoot) {
@@ -392,8 +466,9 @@ function Invoke-UpdateTransaction([string]$AppRoot, [string]$SessionPath, [int]$
         if ((Get-AppVersion (Join-Path $stage 'version.json')).version -cne $state.targetVersion) { throw 'staged 대상 버전 불일치' }
         Set-UpdateState $session $state 'waiting_for_gui_exit'
         Write-UpdateJson (Join-Path $session 'worker-ready.json') @{sessionId=$state.sessionId;workerPid=$PID;workerStartTime=$state.workerStartTime}
-        Wait-UpdateGuiExit $state $TimeoutSeconds
-        Assert-NoAppProcesses $root -IncludeGui
+        Wait-UpdateGuiExit $state ([Math]::Min($TimeoutSeconds,10))
+        Write-UpdateLog $session '기존 GUI 실제 종료 확인'
+        Wait-AppDirectoryReleased $root $session
         $state.sourceFiles = $(if ($state.sourceHadApp) { @(Get-AppSnapshot $app $root) } else { @() })
         if ((Get-InstalledAppVersion $app) -cne $state.sourceVersion) { throw '원본 App 버전이 변경되었습니다.' }
         $sourceReady=$true
@@ -416,6 +491,9 @@ function Invoke-UpdateTransaction([string]$AppRoot, [string]$SessionPath, [int]$
         if (-not $state) { throw }
         if (-not $state.originalError) { $state.originalError=$original.Exception.Message }
         try { Write-UpdateLog $session ('ORIGINAL ERROR: '+$state.originalError) } catch {}
+        if ($state.state -eq 'backing_up' -and -not $mutated) {
+            try { Write-UpdateLog $session 'App 백업 이동 실패: 원래 App을 보존합니다. 외부 잠금 가능성을 확인하고 재시도하세요. 이동 반복/외부 프로세스 강제 종료는 하지 않습니다.' } catch {}
+        }
         if ($mutated -or (Test-Path (Join-Path $session 'backup\App')) -or ($sourceReady -and $state.sourceHadApp)) {
             try {
                 if ($rollbackAttempted) { throw $original }

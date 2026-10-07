@@ -11,9 +11,13 @@ $ErrorActionPreference = "Stop"
 $AppVersion = Get-AppVersion (Join-Path $PSScriptRoot 'version.json')
 . (Join-Path $PSScriptRoot 'update-transaction.ps1')
 $OperationMutex = $null
+$PreviousProcessDirectory=[Environment]::CurrentDirectory
 try {
     $OperationMutex = Enter-AppMutex $AppRoot 'operation'
     if (Get-PendingUpdate $AppRoot) { throw '미완료 업데이트를 먼저 복구해야 합니다.' }
+    # 기존 Invoke-Adb 함수는 그대로 두고 기본 실행 디렉터리를 App 밖에 고정한다.
+    $AdbWorkingDirectory=Get-AdbWorkingDirectory $AdbPath $AppRoot
+    [Environment]::CurrentDirectory=$AdbWorkingDirectory
 
 $StatusFile = Join-Path $StateDir "status.json"
 $LogFile = Join-Path $StateDir "sync.log"
@@ -583,6 +587,7 @@ try {
     Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
     Write-Status "starting" "ADB 연결 확인 중..." 0 1
     Write-Log ("===== SELECTED-SYSTEM MIRROR START v" + $AppVersion.version + " =====")
+    Write-Log ('ADB executable='+$AdbPath+' default WorkingDirectory='+$AdbWorkingDirectory)
     Write-EsdeLifecycleLog 'ESDE STOPPED: false (source validation pending)'
 
     $dev = Invoke-Adb -s $Serial get-state
@@ -670,4 +675,4 @@ catch {
 }
 
 }
-finally { Exit-AppMutex $OperationMutex }
+finally { [Environment]::CurrentDirectory=$PreviousProcessDirectory; Exit-AppMutex $OperationMutex }

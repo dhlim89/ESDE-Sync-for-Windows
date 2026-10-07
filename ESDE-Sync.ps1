@@ -62,9 +62,13 @@ function Find-DefaultSource {
 }
 
 function Get-Devices([string]$Adb) {
-    & $Adb start-server | Out-Null
+    $log={param($message) Write-AdbLifecycleLog (Join-Path $StateDir 'adb-lifecycle.log') $message}
+    $start=Invoke-AppAdb $Adb $AppRoot @('start-server') 10000 $log
+    if ($start.Code -ne 0) { throw 'ADB start-server 실패' }
+    $devices=Invoke-AppAdb $Adb $AppRoot @('devices') 10000 $log
+    if ($devices.Code -ne 0) { throw 'ADB devices 실패' }
     $result = @()
-    foreach ($line in (& $Adb devices | Select-Object -Skip 1)) {
+    foreach ($line in ($devices.Out -split "`n" | Select-Object -Skip 1)) {
         if (-not $line.Trim()) { continue }
         $parts = $line -split "\s+"
         if ($parts.Count -lt 2) { continue }
@@ -72,7 +76,7 @@ function Get-Devices([string]$Adb) {
         $state = $parts[1]
         $model = $serial
         if ($state -eq "device") {
-            $m = (& $Adb -s $serial shell getprop ro.product.model 2>$null | Out-String).Trim()
+            $m = (Invoke-AppAdb $Adb $AppRoot @('-s',$serial,'shell','getprop','ro.product.model') 10000 $log).Out.Trim()
             if ($m) { $model = $m }
         }
         elseif ($state -eq "unauthorized") {
@@ -111,32 +115,12 @@ function Read-SharedTextFile([string]$Path) {
 
 
 function Stop-AdbServer {
-    try {
-        $shutdownAdb = $script:Adb
-        if (-not $shutdownAdb) { $shutdownAdb = $BundledAdb }
-        if (Test-Path -LiteralPath $shutdownAdb) {
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $shutdownAdb
-            $psi.Arguments = "kill-server"
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-
-            $p = New-Object System.Diagnostics.Process
-            $p.StartInfo = $psi
-            [void]$p.Start()
-            $null = $p.StandardOutput.ReadToEnd()
-            $null = $p.StandardError.ReadToEnd()
-            $p.WaitForExit()
-            $p.Dispose()
-        }
-    }
-    catch {
-        # App shutdown should not be blocked by an ADB cleanup failure.
-    }
+    $shutdownAdb=$script:Adb
+    if (-not $shutdownAdb) { $shutdownAdb=$BundledAdb }
+    $log={param($message) Write-AdbLifecycleLog (Join-Path $StateDir 'adb-lifecycle.log') $message}
+    try { Stop-AppAdbServer $shutdownAdb $AppRoot 10000 $log }
+    catch { & $log ('ADB 종료 실패: '+$_.Exception.Message) }
 }
-
 $form = New-Object System.Windows.Forms.Form
 $form.Text = ("ES-DE Sync v" + $AppVersion.version)
 $form.Size = New-Object System.Drawing.Size(760, 640)
@@ -346,6 +330,7 @@ $installUpdateBtn.Add_Click({
         $script:InstallSession=$null; $script:InstallProcess=$null
         $operation = Enter-AppMutex $AppRoot 'operation'
         Assert-NoAppProcesses $AppRoot
+        Stop-AppAdbServer $script:Adb $AppRoot 10000 {param($message) Write-AdbLifecycleLog (Join-Path $StateDir 'adb-lifecycle.log') $message}
         $identity = Get-UpdateProcess $PID
         $script:InstallSession = New-PackageUpdateSession $AppRoot $script:VerifiedPackage $AppVersion $PID $identity.startTime
         $script:UpdateInstalling = $true; $syncBtn.Enabled=$false; $installUpdateBtn.Enabled=$false

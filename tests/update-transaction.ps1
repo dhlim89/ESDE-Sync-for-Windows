@@ -10,6 +10,8 @@ $nativeWindows=${function:Get-GuiWindows}; $nativeMove=${function:Move-UpdateDir
 function Check($value,[string]$name) { if(-not $value){throw "검증 실패: $name"}; $script:Passed++; Write-Output "PASS: $name" }
 function Reject([string]$name,[scriptblock]$Work) { $blocked=$false; try { & $Work | Out-Null } catch {$blocked=$true}; Check $blocked $name }
 function Assert-NoAppProcesses { param($AppRoot,[switch]$IncludeGui) if($script:Fault -eq 'sync-running'){throw '모의 sync worker 실행 중'} }
+function Wait-AppDirectoryReleased { param($AppRoot,$SessionPath) Assert-NoAppProcesses $AppRoot -IncludeGui }
+function Get-AdbServerProcesses { return @() } # 실제 설치본의 ADB는 테스트에서 조회/종료하지 않는다.
 function Get-UpdateProcess([int]$ProcessId) {
     if($script:FakeProcesses.ContainsKey($ProcessId)){return $script:FakeProcesses[$ProcessId]}
     return (& $nativeProcess $ProcessId)
@@ -99,7 +101,8 @@ Check ($result.state -eq 'completed' -and $script:Launches -eq $launchCount) 'co
 foreach($fault in @('missing','locked','backup','staged','launch','no-confirmation','wrong-session','wrong-version','wrong-pid','wrong-start','exit','post-missing','sync-running','target-mismatch','gui-exit','no-window','hidden-window','wrong-window-pid','wrong-title')) {
     $f=New-Fixture $fault; $script:Fault=$fault; $lock=$null
     if($fault -eq 'missing'){Remove-Item -LiteralPath (Join-Path $f.Session 'staged\App\update-worker.ps1')}
-    if($fault -eq 'locked'){$lock=[IO.File]::Open((Join-Path $f.Root 'App\old-data.txt'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)}
+    # 읽기는 허용하지만 삭제 공유를 거부하여 실제 Directory.Move 실패를 재현한다.
+    if($fault -eq 'locked'){$lock=[IO.File]::Open((Join-Path $f.Root 'App\old-data.txt'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)}
     if($fault -in @('target-mismatch','gui-exit')) {
         $s=Read-UpdateJson (Join-Path $f.Session 'state.json')
         if($fault -eq 'target-mismatch'){$s.targetVersion='1.4.10'}
@@ -199,6 +202,9 @@ Check ((Read-UpdateJson (Join-Path $f.Session 'state.json')).state -eq 'verified
 # 임시 설치본과 테스트 Forms를 사용하는 실행기/시작 확인 통합 검증. 실제 ADB는 없다.
 $nativePayload=Join-Path $sandbox 'native-payload'
 Copy-Item -LiteralPath $payload -Destination $nativePayload -Recurse
+# 이 통합 fixture의 adb.exe는 기존 데이터 보존용 텍스트이다. ADB 종료는 별도 잠금 테스트로 검증한다.
+[IO.File]::AppendAllText((Join-Path $nativePayload 'update-common.ps1'), "`nfunction Stop-AppAdbServer { param(`$AdbPath,`$AppRoot,`$TimeoutMilliseconds,`$Log) }`n", (New-Object Text.UTF8Encoding($false)))
+[IO.File]::AppendAllText((Join-Path $nativePayload 'update-common.ps1'), "`nfunction Get-AdbServerProcesses { return @() }`n", (New-Object Text.UTF8Encoding($false)))
 $dummyGui=@'
 param($InstallRoot,$UpdateSession,$UpdateSessionId,$ConfirmationFile)
 $ErrorActionPreference='Stop'
@@ -219,6 +225,8 @@ $f=New-Fixture 'native-worker'
 # 초기 준비 세션은 아직 App에 적용하지 않았으므로 안전하게 취소 상태를 기록한다.
 $cancel=Read-UpdateJson (Join-Path $f.Session 'state.json'); Set-UpdateState $f.Session $cancel 'failed'
 $nativeSession=New-LocalUpdateSession $f.Root $nativePayload $target
+[IO.File]::AppendAllText((Join-Path $nativeSession 'update-common.ps1'), "`nfunction Stop-AppAdbServer { param(`$AdbPath,`$AppRoot,`$TimeoutMilliseconds,`$Log) }`n", (New-Object Text.UTF8Encoding($false)))
+[IO.File]::AppendAllText((Join-Path $nativeSession 'update-common.ps1'), "`nfunction Get-AdbServerProcesses { return @() }`n", (New-Object Text.UTF8Encoding($false)))
 $child=Run-Child (Join-Path $nativeSession 'update-worker.ps1') @('-AppRoot',$f.Root,'-SessionPath',$nativeSession)
 $nativeState=Read-UpdateJson (Join-Path $nativeSession 'state.json')
 try {
@@ -295,6 +303,7 @@ $tokens=$null;$errors=$null;$guiAst=[Management.Automation.Language.Parser]::Par
 $stopFn=$guiAst.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Stop-AdbServer'},$false)
 . ([scriptblock]::Create($stopFn.Extent.Text))
 $oldAdb=$script:Adb; $script:Adb=$fakeAdb
+$AppRoot=$f.Root; $StateDir=Join-Path $f.Root 'State'
 try {Stop-AdbServer;Check ([IO.File]::ReadAllText($recordPath) -ceq 'kill-server') 'GUI 종료 ADB 경로/kill-server 인수(가짜 실행 파일)'}
 finally {$script:Adb=$oldAdb;$env:ESDE_TEST_ADB_ARGUMENTS=$oldEnv}
 # 실제 Windows API로 별도 테스트 Forms 프로세스의 창 상태를 확인한다.

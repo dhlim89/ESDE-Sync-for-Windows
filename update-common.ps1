@@ -1,4 +1,69 @@
 ﻿# Windows PowerShell 5.1용 업데이트 계약. 설치 폴더 교체 기능은 포함하지 않는다.
+function Get-AdbWorkingDirectory([string]$AdbPath, [string]$AppRoot) {
+    $directory=Split-Path ([IO.Path]::GetFullPath($AdbPath)) -Parent
+    $app=[IO.Path]::GetFullPath((Join-Path $AppRoot 'App')).TrimEnd('\')
+    if ($directory -ieq $app -or $directory.StartsWith($app+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'ADB 실행 위치는 App 밖이어야 합니다.' }
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'ADB 실행 디렉터리 누락' }
+    return $directory
+}
+
+function Write-AdbLifecycleLog([string]$Path,[string]$Message) {
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
+    $writer=New-Object IO.StreamWriter($stream,(New-Object Text.UTF8Encoding($false)))
+    try { $writer.WriteLine(('['+(Get-Date).ToUniversalTime().ToString('o')+'] '+$Message)) } finally {$writer.Dispose()}
+}
+
+function Invoke-AppAdb([string]$AdbPath,[string]$AppRoot,[string[]]$Arguments,[int]$TimeoutMilliseconds=10000,[scriptblock]$Log) {
+    $working=Get-AdbWorkingDirectory $AdbPath $AppRoot
+    if ($Log) { & $Log ('ADB executable='+$AdbPath+' WorkingDirectory='+$working+' args='+($Arguments -join ' ')) | Out-Null }
+    $psi=New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName=$AdbPath; $psi.WorkingDirectory=$working
+    $psi.Arguments=(@($Arguments|ForEach-Object { '"'+($_ -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1')+'"' }) -join ' ')
+    $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true
+    $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true
+    $psi.StandardOutputEncoding=[Text.Encoding]::UTF8; $psi.StandardErrorEncoding=[Text.Encoding]::UTF8
+    $process=New-Object Diagnostics.Process; $process.StartInfo=$psi
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void]$process.Start()
+        $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) { throw 'ADB client 실행 시간 초과. 강제 종료하지 않습니다.' }
+        $budget=[Math]::Max(1,$TimeoutMilliseconds-[int]$watch.ElapsedMilliseconds)
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout,$stderr),$budget)) { throw 'ADB 출력 수집 시간 초과' }
+        if ($Log) { & $Log ('ADB exitCode='+$process.ExitCode+' stderr='+$stderr.Result.Trim()) | Out-Null }
+        return [pscustomobject]@{Code=$process.ExitCode;Out=$stdout.Result;Err=$stderr.Result;WorkingDirectory=$working}
+    } finally { $process.Dispose() }
+}
+
+function Get-AdbServerProcesses {
+    $servers=@()
+    foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='adb.exe'" -ErrorAction Stop)) {
+        if (-not $process.CommandLine) { throw ('ADB 프로세스 확인 불가: PID '+$process.ProcessId) }
+        if ($process.CommandLine -match '(?:fork-server\s+server|\b(?:server\s+nodaemon|nodaemon\s+server)\b)') { $servers+=$process }
+    }
+    return $servers
+}
+
+function Stop-AppAdbServer([string]$AdbPath,[string]$AppRoot,[int]$TimeoutMilliseconds=10000,[scriptblock]$Log) {
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    $servers=@(Get-AdbServerProcesses)
+    if ($Log) { & $Log ('ADB server PID before='+($servers.ProcessId -join ',')) | Out-Null }
+    if (-not (Test-Path -LiteralPath $AdbPath -PathType Leaf)) {
+        if ($servers.Count) { throw 'ADB 서버가 있지만 종료 실행 파일이 없습니다.' }
+        if ($Log) { & $Log 'ADB 서버 없음 / 실행 파일 없음' | Out-Null }; return
+    }
+    $result=Invoke-AppAdb $AdbPath $AppRoot @('kill-server') $TimeoutMilliseconds $Log
+    if ($result.Code -ne 0) { throw ('ADB kill-server 실패: exitCode='+$result.Code+' '+$result.Err) }
+    do {
+        $remaining=@(Get-AdbServerProcesses)
+        if (-not $remaining.Count) {
+            if ($Log) { & $Log 'ADB kill-server 성공 / 서버 프로세스 종료 확인' | Out-Null }; return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    throw ('ADB 서버 종료 시간 초과: PID '+($remaining.ProcessId -join ','))
+}
+
 function ConvertTo-UpdateVersion([string]$Value) {
     if ($Value -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw "잘못된 버전: $Value" }
     return [version]$Value

@@ -191,3 +191,13 @@ GUI 가시성 안전 수정
 - 시작 확인은 PID 소유의 top-level 창, IsWindowVisible=True, 정확한 버전 제목까지 검사합니다.
 - 프로세스가 살아 있어도 가시적인 메인 창이 없으면 시간 초과 후 기존 롤백을 수행합니다.
 - 이전 GUI 복원도 가시적인 창을 확인합니다. 실제 설치본 재시험은 별도로 수행합니다.
+
+ADB 디렉터리 잠금 안전 수정
+---------------------------
+- GUI의 ADB 호출은 실행 파일 디렉터리를 WorkingDirectory로 지정합니다.
+- sync worker는 진입/종료 부분에서 기본 프로세스 디렉터리를 App 밖에 고정/복원합니다. 동기화 함수는 변경하지 않습니다.
+- GUI 종료는 kill-server 결과와 서버 종료를 확인하고 State/adb-lifecycle.log에 기록합니다.
+- 업데이트는 GUI/sync/App PowerShell 부재와 ADB 종료 및 App CurrentDirectory 보유 여부를 확인한 뒤 이동합니다.
+- 종료/잠금 확인은 제한 시간 내 수행하며 이동 재시도나 무관한 프로세스 강제 종료는 없습니다.
+- 실제 서버 확인 실패 또는 외부 잠금 오류에서는 원래 오류를 보존하고 기존 복구 절차를 사용합니다.
+- 임시 환경 검증: powershell.exe -NoProfile -File .\tests\adb-lock-static.ps1
