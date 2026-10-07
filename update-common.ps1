@@ -20,7 +20,7 @@ function Compare-UpdateVersion([string]$Left, [string]$Right) {
 }
 
 function Get-PackageFiles {
-    return @('App/ESDE-Sync.ps1','App/sync-worker.ps1','App/update-common.ps1','App/version.json',
+    return @('App/ESDE-Sync.ps1','App/sync-worker.ps1','App/update-common.ps1','App/update-transaction.ps1','App/update-worker.ps1','App/version.json',
         'App/esde-sync-icon-v141.ico','App/esde-sync-icon-v141.png',
         'install.ps1','install.cmd','uninstall.ps1','uninstall.cmd','README.txt')
 }
@@ -205,10 +205,10 @@ function Save-VerifiedUpdate($Candidate, $CurrentVersion, [string]$DownloadRoot)
         if ((Get-Item -LiteralPath $partial).Length -ne $candidate.Zip.size) { throw 'Release asset 크기 불일치' }
         $bytes = Receive-UpdateResource $candidate.Checksum.browser_download_url 4096
         $checksum = [Text.Encoding]::UTF8.GetString($bytes)
-        [void](Assert-UpdateHashes $partial $checksum $candidate.Zip.digest $candidate.Zip.name)
+        $verifiedHash = Assert-UpdateHashes $partial $checksum $candidate.Zip.digest $candidate.Zip.name
         $result = Test-UpdatePackage $partial $candidate.Version $CurrentVersion
         Move-Item -LiteralPath $partial -Destination $zipPath
-        return [pscustomobject]@{Verified=$true;Version=$result.Version;ZipPath=$zipPath}
+        return [pscustomobject]@{Verified=$true;Version=$result.Version;ZipPath=$zipPath;Sha256=$verifiedHash}
     }
     finally { if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force } }
 }

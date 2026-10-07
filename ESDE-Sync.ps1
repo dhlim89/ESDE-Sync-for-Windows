@@ -1,15 +1,25 @@
-﻿param()
+﻿param([string]$InstallRoot, [string]$UpdateSession, [string]$UpdateSessionId,
+    [ValidateSet('startup-confirmation.json','rollback-confirmation.json')][string]$ConfirmationFile = 'startup-confirmation.json')
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot 'update-common.ps1')
+. (Join-Path $PSScriptRoot 'update-transaction.ps1')
 $AppVersion = Get-AppVersion (Join-Path $PSScriptRoot 'version.json')
 $UpdateCommonPath = Join-Path $PSScriptRoot 'update-common.ps1'
 $VersionFile = Join-Path $PSScriptRoot 'version.json'
 
 $AppRoot = Join-Path $env:LOCALAPPDATA "ESDE-Sync"
+if ($InstallRoot) {
+    $AppRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    if ($PSScriptRoot -ine (Join-Path $AppRoot 'App')) { throw 'GUI 설치 루트 계약 오류' }
+}
+$GuiMutex = $null
+try { $GuiMutex = Enter-AppMutex $AppRoot 'gui' }
+catch { [void][System.Windows.Forms.MessageBox]::Show('ES-DE Sync GUI가 이미 실행 중입니다.'); exit 1 }
+try {
 $InstallDir = Join-Path $AppRoot "App"
 $ConfigFile = Join-Path $AppRoot "config.json"
 $StateDir = Join-Path $AppRoot "State"
@@ -102,9 +112,11 @@ function Read-SharedTextFile([string]$Path) {
 
 function Stop-AdbServer {
     try {
-        if (Test-Path -LiteralPath $AdbExe) {
+        $shutdownAdb = $script:Adb
+        if (-not $shutdownAdb) { $shutdownAdb = $BundledAdb }
+        if (Test-Path -LiteralPath $shutdownAdb) {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $AdbExe
+            $psi.FileName = $shutdownAdb
             $psi.Arguments = "kill-server"
             $psi.UseShellExecute = $false
             $psi.CreateNoWindow = $true
@@ -199,6 +211,13 @@ $updateBtn.Location = New-Object System.Drawing.Point(610, 278)
 $updateBtn.Size = New-Object System.Drawing.Size(110, 31)
 $updateBtn.Enabled = $false
 $form.Controls.Add($updateBtn)
+$installUpdateBtn = New-Object System.Windows.Forms.Button
+$installUpdateBtn.Text = '설치'
+$installUpdateBtn.Location = New-Object System.Drawing.Point(610, 278)
+$installUpdateBtn.Size = New-Object System.Drawing.Size(110, 31)
+$installUpdateBtn.Visible = $false
+$installUpdateBtn.Enabled = $false
+$form.Controls.Add($installUpdateBtn)
 
 $warn = New-Object System.Windows.Forms.Label
 $warn.Text = "선택된 시스템은 완전 미러링하되, 각 시스템의 _TEST / _UNREGISTERED 폴더는 항상 보존·제외합니다."
@@ -238,9 +257,17 @@ $script:WorkerProcess = $null
 $script:UpdateTask = $null
 $script:UpdateCandidate = $null
 $script:UpdateBusy = $false
+$script:VerifiedPackage = $null
+$script:UpdateInstalling = $false
+$script:AllowInstallClose = $false
+$script:InstallProcess = $null
+$script:InstallSession = $null
+$script:StartupPending = [bool]$UpdateSession -or [bool](Get-PendingUpdate $AppRoot)
+if ($script:StartupPending) { $syncBtn.Enabled = $false; $updateLabel.Text = '업데이트 완료 또는 복구 확인 중...' }
 
 function Start-UpdateTask([string]$Kind, $Candidate) {
     if ($script:UpdateTask) { throw '업데이트 작업이 이미 실행 중입니다.' }
+    if ($script:UpdateInstalling -or ($Kind -eq 'download' -and $script:StartupPending)) { throw '업데이트 설치 또는 복구가 진행 중입니다.' }
     if ($Kind -eq 'download' -and $script:WorkerProcess -and -not $script:WorkerProcess.HasExited) { throw '동기화 중에는 업데이트 다운로드를 시작할 수 없습니다.' }
     $ps = [PowerShell]::Create()
     $jobScript = {
@@ -290,8 +317,11 @@ $updateTimer.Add_Tick({
         }
         else {
             if ($output.Count -ne 1 -or -not $output[0].Verified) { throw '패키지 검증 결과 오류' }
-            $updateLabel.Text = '업데이트 패키지 검증 완료 (설치 기능 미활성)'
-            [void][System.Windows.Forms.MessageBox]::Show(('업데이트 패키지 검증 완료. 설치 기능은 다음 단계에서 활성화됩니다.' + "`r`n" + $output[0].ZipPath))
+            $script:VerifiedPackage = $output[0]
+            $updateLabel.Text = '업데이트 패키지 검증 완료. 설치 버튼으로 적용할 수 있습니다.'
+            $updateBtn.Visible = $false
+            $installUpdateBtn.Visible = $true
+            $installUpdateBtn.Enabled = $true
         }
     }
     catch { $updateLabel.Text = '업데이트 확인/검증 실패: ' + $_.Exception.Message }
@@ -299,11 +329,79 @@ $updateTimer.Add_Tick({
         $task.PowerShell.Dispose()
         $script:UpdateTask = $null
         $script:UpdateBusy = $false
-        $syncBtn.Enabled = -not ($script:WorkerProcess -and -not $script:WorkerProcess.HasExited)
-        $updateBtn.Enabled = [bool]$script:UpdateCandidate
+        $syncBtn.Enabled = -not $script:StartupPending -and -not $script:UpdateInstalling -and -not ($script:WorkerProcess -and -not $script:WorkerProcess.HasExited)
+        $updateBtn.Enabled = [bool]$script:UpdateCandidate -and -not $script:StartupPending -and -not $script:UpdateInstalling
     }
 })
 $updateTimer.Start()
+
+$installUpdateBtn.Add_Click({
+    $operation = $null
+    try {
+        if ($script:UpdateTask -or $script:UpdateInstalling -or $script:StartupPending -or
+            ($script:WorkerProcess -and -not $script:WorkerProcess.HasExited)) { throw '다른 작업이 실행 중입니다.' }
+        if (-not $script:VerifiedPackage) { throw '검증된 업데이트 패키지가 없습니다.' }
+        $answer = [System.Windows.Forms.MessageBox]::Show('업데이트를 설치할까요? 현재 창은 종료되고 새 버전이 실행됩니다. 실패하면 이전 App을 복원합니다.', '업데이트 설치', [System.Windows.Forms.MessageBoxButtons]::YesNo)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $script:InstallSession=$null; $script:InstallProcess=$null
+        $operation = Enter-AppMutex $AppRoot 'operation'
+        Assert-NoAppProcesses $AppRoot
+        $identity = Get-UpdateProcess $PID
+        $script:InstallSession = New-PackageUpdateSession $AppRoot $script:VerifiedPackage $AppVersion $PID $identity.startTime
+        $script:UpdateInstalling = $true; $syncBtn.Enabled=$false; $installUpdateBtn.Enabled=$false
+        $runner = Join-Path $script:InstallSession 'update-worker.ps1'
+        $args = '-NoProfile -ExecutionPolicy Bypass -File "'+$runner+'" -AppRoot "'+$AppRoot+'" -SessionPath "'+$script:InstallSession+'"'
+        $script:InstallProcess = Start-Process powershell.exe -ArgumentList $args -WindowStyle Hidden -PassThru
+        $updateLabel.Text='업데이트 worker 준비 및 안전한 종료 대기...'
+    }
+    catch {
+        $failure=$_.Exception.Message
+        if ($script:InstallSession -and -not $script:InstallProcess) {
+            $state = Read-UpdateJson (Join-Path $script:InstallSession 'state.json')
+            $state.originalError=$failure
+            Set-UpdateState $script:InstallSession $state 'failed'
+        }
+        $script:UpdateInstalling=$false
+        $script:StartupPending=[bool](Get-PendingUpdate $AppRoot)
+        $syncBtn.Enabled=-not $script:StartupPending -and -not ($script:WorkerProcess -and -not $script:WorkerProcess.HasExited)
+        $installUpdateBtn.Enabled=-not $script:StartupPending
+        [void][System.Windows.Forms.MessageBox]::Show($failure, '설치 준비 실패')
+    }
+    finally { Exit-AppMutex $operation }
+})
+
+$installTimer = New-Object System.Windows.Forms.Timer
+$installTimer.Interval=200
+$installTimer.Add_Tick({
+    if ($script:UpdateInstalling -and $script:InstallProcess) {
+        $ready = Join-Path $script:InstallSession 'worker-ready.json'
+        if (Test-Path $ready) {
+            try {
+                $value=Read-UpdateJson $ready
+                $alive=Get-UpdateProcess $script:InstallProcess.Id
+                if ($alive -and $value.sessionId -ceq (Split-Path $script:InstallSession -Leaf) -and
+                    $value.workerPid -eq $alive.pid -and $value.workerStartTime -ceq $alive.startTime) {
+                    $script:AllowInstallClose=$true
+                    $form.Close()
+                    return
+                }
+            } catch { $updateLabel.Text='worker 시작 확인 대기 중...' }
+        }
+        if ($script:InstallProcess.HasExited) {
+            $script:UpdateInstalling=$false
+            $script:StartupPending=[bool](Get-PendingUpdate $AppRoot)
+            $syncBtn.Enabled=-not $script:StartupPending
+            $installUpdateBtn.Enabled=-not $script:StartupPending
+            $updateLabel.Text='업데이트 worker 준비 실패. 세션 로그를 확인해 주세요.'
+        }
+    }
+    if ($script:StartupPending -and -not (Get-PendingUpdate $AppRoot)) {
+        $script:StartupPending=$false
+        $syncBtn.Enabled=-not $script:UpdateBusy
+        $updateBtn.Enabled=[bool]$script:UpdateCandidate
+    }
+})
+$installTimer.Start()
 
 function Refresh-Devices {
     if (-not $script:Adb) {
@@ -329,7 +427,7 @@ $refreshBtn.Add_Click({ Refresh-Devices })
 
 $syncBtn.Add_Click({
     try {
-        if ($script:UpdateBusy) { throw '업데이트 다운로드·검증 중에는 동기화를 시작할 수 없습니다.' }
+        if ($script:UpdateBusy -or $script:UpdateInstalling -or $script:StartupPending) { throw '업데이트 또는 복구 작업 중에는 동기화를 시작할 수 없습니다.' }
         $source = $sourceBox.Text.Trim()
         foreach ($name in @("roms","gamelists","downloaded_media")) {
             if (-not (Test-Path (Join-Path $source $name))) {
@@ -393,7 +491,7 @@ $timer.Add_Tick({
     if ($script:WorkerProcess.HasExited) {
         $code = $script:WorkerProcess.ExitCode
         $script:WorkerProcess = $null
-        $syncBtn.Enabled = -not $script:UpdateBusy
+        $syncBtn.Enabled = -not $script:UpdateBusy -and -not $script:UpdateInstalling -and -not $script:StartupPending
         if ($code -eq 0) {
             $progress.Value = 100
             $statusLabel.Text = "동기화 완료"
@@ -416,16 +514,19 @@ if ($config.SourceRoot -and (Test-Path $config.SourceRoot)) {
 
 $form.Add_Shown({
     Refresh-Devices
+    if ($UpdateSession) { Write-GuiConfirmation $UpdateSession $AppRoot $UpdateSessionId $AppVersion.version $ConfirmationFile }
     try { Start-UpdateTask 'check' $null } catch { $updateLabel.Text = '업데이트 확인 실패: ' + $_.Exception.Message }
 })
 
 $form.Add_FormClosing({
+    if ($script:UpdateInstalling -and -not $script:AllowInstallClose) { $_.Cancel=$true; return }
     if ($script:UpdateBusy) {
         $_.Cancel = $true
         [void][System.Windows.Forms.MessageBox]::Show('다운로드·검증이 끝난 뒤 창을 닫아 주세요.')
         return
     }
     $updateTimer.Stop()
+    $installTimer.Stop()
     if ($script:UpdateTask) {
         [void]$script:UpdateTask.PowerShell.BeginStop($null, $null)
     }
@@ -433,3 +534,5 @@ $form.Add_FormClosing({
 })
 
 [void]$form.ShowDialog()
+}
+finally { Exit-AppMutex $GuiMutex }

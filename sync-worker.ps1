@@ -9,6 +9,11 @@
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot 'update-common.ps1')
 $AppVersion = Get-AppVersion (Join-Path $PSScriptRoot 'version.json')
+. (Join-Path $PSScriptRoot 'update-transaction.ps1')
+$OperationMutex = $null
+try {
+    $OperationMutex = Enter-AppMutex $AppRoot 'operation'
+    if (Get-PendingUpdate $AppRoot) { throw '미완료 업데이트를 먼저 복구해야 합니다.' }
 
 $StatusFile = Join-Path $StateDir "status.json"
 $LogFile = Join-Path $StateDir "sync.log"
@@ -663,3 +668,6 @@ catch {
     try { Write-Status "error" ("오류: " + $msg) 0 100 } catch {}
     exit 1
 }
+
+}
+finally { Exit-AppMutex $OperationMutex }

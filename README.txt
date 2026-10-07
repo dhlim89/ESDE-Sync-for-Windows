@@ -160,3 +160,27 @@ v1.4.8 1차 개발
 - 정적 검증: powershell.exe -NoProfile -File .\tests\update-static.ps1
 - 개발 패키징: powershell.exe -NoProfile -File .\scripts\package-release.ps1 -Version 1.4.8
 - tag 검증 패키징: powershell.exe -NoProfile -File .\scripts\package-release.ps1 -GitPath <git.exe>
+v1.4.8 2차 개발 — 안전한 App 적용
+--------------------------------
+- 검증된 패키지의 설치 버튼을 누르고 승인하면 App 밖의 .Updates/<sessionId>에서 worker를 실행합니다.
+- GUI 종료, sync worker 부재, staged 파일/버전/해시를 확인한 뒤 App 디렉터리를 이동합니다.
+- 기존 App은 backup/App으로 보관하고 staged/App을 설치 App으로 이동합니다.
+- 새 GUI가 sessionId/버전/PID/프로세스 시작 시각을 확인 파일에 기록해야 completed가 됩니다.
+- 실패하면 새 App을 격리하고 백업의 검증된 복원 사본을 이동해 이전 GUI를 실행합니다.
+- completed 및 롤백 후에도 원본 backup/App은 보존합니다. 자동 백업 삭제는 없습니다.
+- State/config.json/platform-tools는 App 교체 및 롤백 대상에서 제외합니다.
+- GUI 인스턴스와 sync/update 작업에는 사용자 SID·설치 루트별 Global named mutex를 사용합니다.
+- 미완료 세션/rollback_failed가 있으면 새로운 동기화를 차단합니다.
+- backing_up/replacing/launching/rolling_back에서 중단된 세션은 재실행 시 보수적으로 롤백합니다.
+- 상태는 임시 JSON 작성 후 원자 교체하고 원래 오류와 롤백 오류를 따로 기록합니다.
+- v1.4.7 또는 1차 GUI에는 시작 확인 기능이 없어 롤백 시 파일 해시와 프로세스 생존으로 복원을 확인합니다.
+- 새 GUI 시작 확인 제한은 기본 30초입니다. 이전 GUI를 강제로 종료하지 않습니다.
+- 최초 v1.4.7 업그레이드: 동기화/GUI를 종료한 후 패키지의 install.cmd를 실행하세요.
+- 수동 설치도 동일한 디렉터리 교체/복구 절차를 사용하고 완료 후 GUI를 실행합니다.
+- 미완료 세션 복구 명령(기존 GUI/sync가 종료된 상태에서 실행):
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<AppRoot>\.Updates\<sessionId>\update-worker.ps1" -AppRoot "<AppRoot>" -SessionPath "<AppRoot>\.Updates\<sessionId>"
+- rollback_failed에서는 backup/App과 update.log를 보존하고 경로/잠금 원인을 확인한 뒤 재시도합니다.
+- 실제 설치 폴더/Windows Forms/Android/실제 GitHub Release 업데이트는 아직 검증하지 않았습니다.
+- 로컬 트랜잭션 검증: powershell.exe -NoProfile -File .\tests\update-transaction.ps1
+- 2차 패키지에는 App 파일 8개와 설치/제거/README 5개, package-manifest.json을 포함합니다.
+- GUI 종료의 ADB 경로를 선택된 script:Adb로 연결해 kill-server 동작을 유지합니다(가짜 실행 파일로 검증).
