@@ -5,6 +5,8 @@
 /State/
 /platform-tools/
 /config.json
+/.Updates/
+/dist/
 *.log
 status.json
 sync.log
@@ -13,6 +15,8 @@ sync.log
 *.tmp
 *.temp
 *.bak
+*.partial
+*.part
 *~
 android-only-delete-test.txt
 dropbox-sync-test.txt

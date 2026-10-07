@@ -3,6 +3,10 @@
 $ErrorActionPreference = "Stop"
 
 $SrcDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PayloadDir = $SrcDir
+if (Test-Path -LiteralPath (Join-Path $SrcDir 'App\version.json')) { $PayloadDir = Join-Path $SrcDir 'App' }
+. (Join-Path $PayloadDir 'update-common.ps1')
+$AppVersion = Get-AppVersion (Join-Path $PayloadDir 'version.json')
 $LegacyRoot = Join-Path $env:LOCALAPPDATA "ESDE-RGCube-Sync"
 $AppRoot = Join-Path $env:LOCALAPPDATA "ESDE-Sync"
 $InstallDir = Join-Path $AppRoot "App"
@@ -25,10 +29,13 @@ if ((Test-Path $LegacyRoot) -and (-not (Test-Path (Join-Path $AppRoot "config.js
     }
 }
 
-Copy-Item -LiteralPath (Join-Path $SrcDir "ESDE-Sync.ps1") -Destination $InstallDir -Force
-Copy-Item -LiteralPath (Join-Path $SrcDir "sync-worker.ps1") -Destination $InstallDir -Force
-Copy-Item -LiteralPath (Join-Path $SrcDir "esde-sync-icon-v141.ico") -Destination $InstallDir -Force
-Copy-Item -LiteralPath (Join-Path $SrcDir "esde-sync-icon-v141.png") -Destination $InstallDir -Force
+Copy-Item -LiteralPath (Join-Path $PayloadDir "ESDE-Sync.ps1") -Destination $InstallDir -Force
+Copy-Item -LiteralPath (Join-Path $PayloadDir "sync-worker.ps1") -Destination $InstallDir -Force
+Copy-Item -LiteralPath (Join-Path $PayloadDir "esde-sync-icon-v141.ico") -Destination $InstallDir -Force
+Copy-Item -LiteralPath (Join-Path $PayloadDir "esde-sync-icon-v141.png") -Destination $InstallDir -Force
+
+Copy-Item -LiteralPath (Join-Path $PayloadDir 'version.json') -Destination $InstallDir -Force
+Copy-Item -LiteralPath (Join-Path $PayloadDir 'update-common.ps1') -Destination $InstallDir -Force
 
 $adb = Join-Path $PlatformDir "adb.exe"
 if (-not (Test-Path $adb)) {
@@ -77,5 +84,5 @@ foreach ($linkPath in $links) {
 }
 
 Write-Host ""
-Write-Host "ES-DE Sync for Android v1.4.7 installed successfully."
+Write-Host ("ES-DE Sync for Android v" + $AppVersion.version + " installed successfully.")
 Write-Host "Run the desktop shortcut: ES-DE Sync"

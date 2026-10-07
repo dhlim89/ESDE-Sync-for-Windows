@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "version": "1.4.8",
+  "channel": "stable",
+  "releaseTag": "v1.4.8",
+  "updaterVersion": "1.0.0",
+  "minimumUpdaterVersion": "1.0.0"
+}

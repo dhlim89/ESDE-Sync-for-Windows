@@ -1,4 +1,4 @@
-﻿ES-DE Sync for Android v1.4.7 Development
+﻿ES-DE Sync for Android v1.4.8 Development
 ======================================
 
 프로그램
@@ -147,3 +147,16 @@ v1.4.7 개발 버전
 
 원격 열거 모의 검증:
   powershell.exe -NoProfile -File .\tests\remote-entries-static.ps1
+v1.4.8 1차 개발
+----------------
+- version.json을 GUI/worker/설치의 단일 버전 기준으로 사용합니다.
+- 시작 후 비동기로 GitHub 최신 stable Release를 조회합니다. 조회 실패는 동기화를 막지 않습니다.
+- 사용자 버튼 승인 후 ZIP/checksum 다운로드와 digest/manifest/ZIP 검증만 수행합니다.
+- 검증된 ZIP은 .Updates 아래에 보관하며 App/State/config/platform-tools에는 적용하지 않습니다.
+- 동기화 중 다운로드는 차단하고 업데이트 확인 중에는 동기화를 허용합니다.
+- App 교체, GUI 종료, 롤백, 업데이트 후 재실행은 아직 구현하지 않았습니다.
+- 배포 ZIP은 App 파일 6개와 설치/제거/README 5개, package-manifest.json만 포함합니다.
+- 패키지 검사는 README 첫 줄과 version.json 버전의 일치를 확인합니다.
+- 정적 검증: powershell.exe -NoProfile -File .\tests\update-static.ps1
+- 개발 패키징: powershell.exe -NoProfile -File .\scripts\package-release.ps1 -Version 1.4.8
+- tag 검증 패키징: powershell.exe -NoProfile -File .\scripts\package-release.ps1 -GitPath <git.exe>

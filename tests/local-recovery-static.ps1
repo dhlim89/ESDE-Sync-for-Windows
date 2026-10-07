@@ -103,8 +103,11 @@ foreach ($scenario in @('preflight', 'stop', 'work', 'success', 'work-and-restar
 }
 Check (@($script:Messages | Where-Object { $_ -match 'ESDE RESTART FAILED' }).Count -eq 2) '복구 실패 로그 누락'
 Check (@($script:Messages | Where-Object { $_ -match 'ORIGINAL SYNC ERROR: WORK ORIGINAL' }).Count -eq 2) '원본 오류 로그 누락'
-foreach ($path in @((Join-Path $repo 'ESDE-Sync.ps1'), (Join-Path $repo 'sync-worker.ps1'), (Join-Path $repo 'install.ps1'), (Join-Path $repo 'README.txt'))) {
-    Check ([IO.File]::ReadAllText($path) -match 'v1\.4\.7') ('버전 누락: ' + $path)
+. (Join-Path $repo 'update-common.ps1')
+$version = Get-AppVersion (Join-Path $repo 'version.json')
+foreach ($path in @((Join-Path $repo 'ESDE-Sync.ps1'), (Join-Path $repo 'sync-worker.ps1'), (Join-Path $repo 'install.ps1'))) {
+    Check ([IO.File]::ReadAllText($path) -match 'Get-AppVersion') ('단일 버전 읽기 누락: ' + $path)
 }
-Write-Output ('PASS: v1.4.7 버전 / PowerShell ' + $PSVersionTable.PSVersion)
+Check ((Get-Content (Join-Path $repo 'README.txt') -TotalCount 1) -match ([regex]::Escape('v'+$version.version))) 'README 버전 불일치'
+Write-Output ('PASS: 단일 버전 / PowerShell ' + $PSVersionTable.PSVersion)
 Write-Output ('모의 파일 위치: ' + $sandbox)

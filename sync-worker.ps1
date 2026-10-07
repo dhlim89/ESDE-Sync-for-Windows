@@ -7,6 +7,8 @@
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'update-common.ps1')
+$AppVersion = Get-AppVersion (Join-Path $PSScriptRoot 'version.json')
 
 $StatusFile = Join-Path $StateDir "status.json"
 $LogFile = Join-Path $StateDir "sync.log"
@@ -575,7 +577,7 @@ $esdeLifecycleStarted = $false
 try {
     Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
     Write-Status "starting" "ADB 연결 확인 중..." 0 1
-    Write-Log "===== SELECTED-SYSTEM MIRROR START v1.4.7 ====="
+    Write-Log ("===== SELECTED-SYSTEM MIRROR START v" + $AppVersion.version + " =====")
     Write-EsdeLifecycleLog 'ESDE STOPPED: false (source validation pending)'
 
     $dev = Invoke-Adb -s $Serial get-state

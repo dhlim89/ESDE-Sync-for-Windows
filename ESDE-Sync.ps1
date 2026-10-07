@@ -4,6 +4,10 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'update-common.ps1')
+$AppVersion = Get-AppVersion (Join-Path $PSScriptRoot 'version.json')
+$UpdateCommonPath = Join-Path $PSScriptRoot 'update-common.ps1'
+$VersionFile = Join-Path $PSScriptRoot 'version.json'
 
 $AppRoot = Join-Path $env:LOCALAPPDATA "ESDE-Sync"
 $InstallDir = Join-Path $AppRoot "App"
@@ -122,7 +126,7 @@ function Stop-AdbServer {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "ES-DE Sync v1.4.7"
+$form.Text = ("ES-DE Sync v" + $AppVersion.version)
 $form.Size = New-Object System.Drawing.Size(760, 640)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 10)
@@ -131,7 +135,7 @@ if (Test-Path $IconFile) {
 }
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = "ES-DE Sync v1.4.7"
+$title.Text = ("ES-DE Sync v" + $AppVersion.version)
 $title.Font = New-Object System.Drawing.Font("Segoe UI", 18, [System.Drawing.FontStyle]::Bold)
 $title.AutoSize = $true
 $title.Location = New-Object System.Drawing.Point(24, 20)
@@ -184,6 +188,18 @@ $info.AutoSize = $true
 $info.Location = New-Object System.Drawing.Point(30, 220)
 $form.Controls.Add($info)
 
+$updateLabel = New-Object System.Windows.Forms.Label
+$updateLabel.Text = '업데이트 확인 대기'
+$updateLabel.Location = New-Object System.Drawing.Point(30, 282)
+$updateLabel.Size = New-Object System.Drawing.Size(565, 30)
+$form.Controls.Add($updateLabel)
+$updateBtn = New-Object System.Windows.Forms.Button
+$updateBtn.Text = '업데이트'
+$updateBtn.Location = New-Object System.Drawing.Point(610, 278)
+$updateBtn.Size = New-Object System.Drawing.Size(110, 31)
+$updateBtn.Enabled = $false
+$form.Controls.Add($updateBtn)
+
 $warn = New-Object System.Windows.Forms.Label
 $warn.Text = "선택된 시스템은 완전 미러링하되, 각 시스템의 _TEST / _UNREGISTERED 폴더는 항상 보존·제외합니다."
 $warn.AutoSize = $true
@@ -219,6 +235,75 @@ $form.Controls.Add($logBox)
 $script:Adb = Get-AdbPath
 $script:Devices = @()
 $script:WorkerProcess = $null
+$script:UpdateTask = $null
+$script:UpdateCandidate = $null
+$script:UpdateBusy = $false
+
+function Start-UpdateTask([string]$Kind, $Candidate) {
+    if ($script:UpdateTask) { throw '업데이트 작업이 이미 실행 중입니다.' }
+    if ($Kind -eq 'download' -and $script:WorkerProcess -and -not $script:WorkerProcess.HasExited) { throw '동기화 중에는 업데이트 다운로드를 시작할 수 없습니다.' }
+    $ps = [PowerShell]::Create()
+    $jobScript = {
+        param($CommonPath, $VersionPath, $Kind, $Candidate, $DownloadRoot)
+        $ErrorActionPreference = 'Stop'
+        . $CommonPath
+        $current = Get-AppVersion $VersionPath
+        if ($Kind -eq 'check') { Get-LatestStableRelease $current }
+        else { Save-VerifiedUpdate $Candidate $current $DownloadRoot }
+    }
+    [void]$ps.AddScript($jobScript.ToString()).AddArgument($UpdateCommonPath).AddArgument($VersionFile).AddArgument($Kind).AddArgument($Candidate).AddArgument((Join-Path $AppRoot '.Updates'))
+    try {
+        $handle = $ps.BeginInvoke()
+        $script:UpdateTask = [pscustomobject]@{PowerShell=$ps;Handle=$handle;Kind=$Kind}
+        $script:UpdateBusy = $Kind -eq 'download'
+        $updateBtn.Enabled = $false
+        if ($script:UpdateBusy) { $syncBtn.Enabled = $false; $updateLabel.Text = '업데이트 다운로드·검증 중...' }
+        else { $updateLabel.Text = '최신 Release 확인 중...' }
+    }
+    catch { $ps.Dispose(); throw }
+}
+
+$updateBtn.Add_Click({
+    try {
+        if (-not $script:UpdateCandidate) { return }
+        if ($script:WorkerProcess -and -not $script:WorkerProcess.HasExited) { throw '동기화 중에는 업데이트 다운로드를 시작할 수 없습니다.' }
+        $answer = [System.Windows.Forms.MessageBox]::Show(('v' + $script:UpdateCandidate.Version + ' 패키지를 다운로드하고 검증할까요? 이번 버전에서는 설치하지 않습니다.'), '업데이트 확인', [System.Windows.Forms.MessageBoxButtons]::YesNo)
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) { Start-UpdateTask 'download' $script:UpdateCandidate }
+    }
+    catch { [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '업데이트 오류') }
+})
+
+$updateTimer = New-Object System.Windows.Forms.Timer
+$updateTimer.Interval = 300
+$updateTimer.Add_Tick({
+    if (-not $script:UpdateTask -or -not $script:UpdateTask.Handle.IsCompleted) { return }
+    $task = $script:UpdateTask
+    try {
+        $output = @($task.PowerShell.EndInvoke($task.Handle))
+        if ($task.PowerShell.HadErrors) { throw ($task.PowerShell.Streams.Error | Out-String) }
+        if ($task.Kind -eq 'check') {
+            if ($output.Count -gt 0 -and $output[-1].Available) {
+                $script:UpdateCandidate = $output[-1]
+                $updateLabel.Text = 'v' + $script:UpdateCandidate.Version + ' 업데이트 가능 (다운로드·검증만)'
+            }
+            else { $updateLabel.Text = '현재 업데이트 가능한 stable Release가 없습니다.' }
+        }
+        else {
+            if ($output.Count -ne 1 -or -not $output[0].Verified) { throw '패키지 검증 결과 오류' }
+            $updateLabel.Text = '업데이트 패키지 검증 완료 (설치 기능 미활성)'
+            [void][System.Windows.Forms.MessageBox]::Show(('업데이트 패키지 검증 완료. 설치 기능은 다음 단계에서 활성화됩니다.' + "`r`n" + $output[0].ZipPath))
+        }
+    }
+    catch { $updateLabel.Text = '업데이트 확인/검증 실패: ' + $_.Exception.Message }
+    finally {
+        $task.PowerShell.Dispose()
+        $script:UpdateTask = $null
+        $script:UpdateBusy = $false
+        $syncBtn.Enabled = -not ($script:WorkerProcess -and -not $script:WorkerProcess.HasExited)
+        $updateBtn.Enabled = [bool]$script:UpdateCandidate
+    }
+})
+$updateTimer.Start()
 
 function Refresh-Devices {
     if (-not $script:Adb) {
@@ -244,6 +329,7 @@ $refreshBtn.Add_Click({ Refresh-Devices })
 
 $syncBtn.Add_Click({
     try {
+        if ($script:UpdateBusy) { throw '업데이트 다운로드·검증 중에는 동기화를 시작할 수 없습니다.' }
         $source = $sourceBox.Text.Trim()
         foreach ($name in @("roms","gamelists","downloaded_media")) {
             if (-not (Test-Path (Join-Path $source $name))) {
@@ -307,7 +393,7 @@ $timer.Add_Tick({
     if ($script:WorkerProcess.HasExited) {
         $code = $script:WorkerProcess.ExitCode
         $script:WorkerProcess = $null
-        $syncBtn.Enabled = $true
+        $syncBtn.Enabled = -not $script:UpdateBusy
         if ($code -eq 0) {
             $progress.Value = 100
             $statusLabel.Text = "동기화 완료"
@@ -328,9 +414,21 @@ if ($config.SourceRoot -and (Test-Path $config.SourceRoot)) {
     if ($found) { $sourceBox.Text = $found }
 }
 
-$form.Add_Shown({ Refresh-Devices })
+$form.Add_Shown({
+    Refresh-Devices
+    try { Start-UpdateTask 'check' $null } catch { $updateLabel.Text = '업데이트 확인 실패: ' + $_.Exception.Message }
+})
 
 $form.Add_FormClosing({
+    if ($script:UpdateBusy) {
+        $_.Cancel = $true
+        [void][System.Windows.Forms.MessageBox]::Show('다운로드·검증이 끝난 뒤 창을 닫아 주세요.')
+        return
+    }
+    $updateTimer.Stop()
+    if ($script:UpdateTask) {
+        [void]$script:UpdateTask.PowerShell.BeginStop($null, $null)
+    }
     Stop-AdbServer
 })
 
