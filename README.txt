@@ -1,4 +1,4 @@
-﻿ES-DE Sync for Android v1.4.8 Development
+﻿ES-DE Sync for Android v1.4.9 Development
 ======================================
 
 프로그램
@@ -201,3 +201,15 @@ ADB 디렉터리 잠금 안전 수정
 - 종료/잠금 확인은 제한 시간 내 수행하며 이동 재시도나 무관한 프로세스 강제 종료는 없습니다.
 - 실제 서버 확인 실패 또는 외부 잠금 오류에서는 원래 오류를 보존하고 기존 복구 절차를 사용합니다.
 - 임시 환경 검증: powershell.exe -NoProfile -File .\tests\adb-lock-static.ps1
+
+v1.4.9 개발: 범용 Android preflight
+---------------------------------
+전원·잠금, activity activities/top, window windows/displays/policy, input과 HOME을 수집합니다.
+Awake/잠금 해제 및 activity/current window/input application/window의 합의가 두 번
+동일하게 확인되는 경우만 허용합니다. HOME 설정만으로 허용하지 않습니다.
+ES-DE 이외 HOME은 실제 HOME component까지 합의해야 합니다.
+제3 앱, 수면/Dozing은 차단하며 누락/실패/모순/SystemUI/NotificationShade도 차단합니다.
+과거 ANR/FocusRequests와 background activity는 현재 focus와 구분합니다.
+각 신호 원문과 판정 이유를 기록합니다. vendor별 미지원 출력은 차단될 수 있습니다.
+동기화/삭제/예약 폴더/gamelist/updater 동작은 유지합니다.
+모의 검증: powershell.exe -NoProfile -File .\tests\foreground-static.ps1

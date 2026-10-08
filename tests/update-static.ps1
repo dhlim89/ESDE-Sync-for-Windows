@@ -3,7 +3,10 @@ $repo = Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'update-common.ps1')
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$info = Get-AppVersion (Join-Path $repo 'version.json')
+$repositoryInfo = Get-AppVersion (Join-Path $repo 'version.json')
+# 기존 updater 회귀 fixture는 1.4.8 -> 1.4.9로 유지한다.
+$info = $repositoryInfo | ConvertTo-Json | ConvertFrom-Json
+$info.version='1.4.8'; $info.releaseTag='v1.4.8'
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ('esde-update-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $sandbox | Out-Null
 $script:Passed = 0
@@ -24,7 +27,10 @@ function New-Fixture([string]$Name, [string[]]$Removed = @(), [object[]]$Extra =
         $source = if ($file.StartsWith('App/')) { $file.Substring(4) } else { $file }
         $bytes = [IO.File]::ReadAllBytes((Join-Path $repo $source))
         if ($file -eq 'App/version.json') { $bytes = [Text.Encoding]::UTF8.GetBytes(($TargetInfo | ConvertTo-Json)) }
-        if ($file -eq 'README.txt' -and $MatchReadme) { $bytes = [Text.Encoding]::UTF8.GetBytes([Text.Encoding]::UTF8.GetString($bytes).Replace(('v'+$info.version+' Development'), ('v'+$TargetInfo.version+' Development'))) }
+        if ($file -eq 'README.txt') {
+            $readmeVersion = if ($MatchReadme) { $TargetInfo.version } else { $info.version }
+            $bytes = [Text.Encoding]::UTF8.GetBytes([Text.Encoding]::UTF8.GetString($bytes).Replace(('v'+$repositoryInfo.version+' Development'), ('v'+$readmeVersion+' Development')))
+        }
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','') } finally { $sha.Dispose() }
         $records += [pscustomobject]@{path=$file;size=$bytes.Length;sha256=$hash}

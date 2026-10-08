@@ -111,45 +111,208 @@ function Quote-Sh([string]$s) {
     return "'" + ($s -replace "'", "'\''") + "'"
 }
 
+function Test-AndroidPackageName([string]$Name) {
+    return [bool]($Name -cmatch '^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)*$')
+}
+
 function Get-PackageFromComponent([string]$Component) {
-    if (-not $Component) { return "" }
-    $c = $Component.Trim()
-    if ($c -match '^([A-Za-z0-9._-]+)/') { return $matches[1] }
-    return ""
+    if (-not $Component) { return '' }
+    $packages=@()
+    foreach($token in ($Component -split '[\s{}(),''"=:\[\]]+')) {
+        $pieces=$token.Split('/')
+        if ($pieces.Count -eq 2 -and (Test-AndroidPackageName $pieces[0]) -and $pieces[1] -cmatch '^\.?[A-Za-z0-9_$][A-Za-z0-9_.$]*$') { $packages+=$pieces[0] }
+    }
+    $packages=@($packages|Sort-Object -Unique)
+    if ($packages.Count -eq 1) { return $packages[0] }
+    return ''
+}
+
+function Get-AndroidComponent([string]$Value) {
+    $components=@()
+    foreach($token in ($Value -split '[\s{}(),''"=:\[\]]+')) {
+        $parts=$token.Split('/')
+        if($parts.Count-eq2 -and (Test-AndroidPackageName $parts[0]) -and $parts[1]-cmatch '^\.?[A-Za-z0-9_$][A-Za-z0-9_.$]*$') {
+            $activity=$parts[1]
+            if($activity.StartsWith('.')){$activity=$parts[0]+$activity}
+            $components+=($parts[0]+'/'+$activity)
+        }
+    }
+    $components=@($components|Sort-Object -Unique)
+    if($components.Count-eq1){return $components[0]};return ''
+}
+
+function Get-AndroidNamedValues([string]$Text,[string[]]$Names) {
+    $pattern='^\s*(?<Field>'+((@($Names|ForEach-Object {[regex]::Escape($_)})) -join '|')+')\s*[:=]\s*(?<Value>.*)$'
+    foreach($line in ($Text -split "`r?`n")) {
+        if($line -match $pattern){[pscustomobject]@{field=$matches.Field;value=$matches.Value.Trim();raw=$line.Trim()}}
+    }
+}
+
+function Get-AndroidFocusPackage([string]$Value) {
+    $component=Get-PackageFromComponent $Value
+    if($component){return $component}
+    if($Value -match '(?:package|packageName|ownerPackage)\s*[:=]\s*([A-Za-z_][A-Za-z0-9_.]*)') {
+        if(Test-AndroidPackageName $matches[1]){return $matches[1]}
+    }
+    if($Value -match '\bname\s*[:=]\s*[''"]([^''"]+)[''"]'){$Value=$matches[1]}
+    $value=$Value.Trim().Trim("'",'"')
+    # 임의의 창 제목에서 패키지처럼 보이는 일부 문자열을 추측하지 않는다.
+    if($value.Contains('.') -and (Test-AndroidPackageName $value)){return $value}
+    return ''
+}
+
+function Get-AndroidInputFocusValues([string]$Text) {
+    # 과거 ANR/FocusRequests/RecentQueue는 현재 입력 대상이 아니다.
+    $historical=[regex]::Match($Text,'(?im)^\s*Input Dispatcher State at time of last ANR:')
+    if($historical.Success){$Text=$Text.Substring(0,$historical.Index)}
+    $section='';$indent=-1
+    foreach($line in ($Text -split "`r?`n")) {
+        if($line -match '^(\s*)(FocusedApplications|FocusedWindows)\s*:\s*(.*)$') {
+            $indent=$matches[1].Length;$section=$matches[2];$value=$matches[3].Trim()
+            if($value){[pscustomobject]@{field=$section;value=$value;raw=$line.Trim()}}
+            continue
+        }
+        if($section){
+            if($line.Trim() -and ($line.Length-$line.TrimStart().Length) -le $indent){$section=''}
+            elseif($line.Trim()){[pscustomobject]@{field=$section;value=$line.Trim();raw=$line.Trim()};continue}
+        }
+        if($line -match '^\s*(focusedApplication|mFocusedApplication|focusedWindow|mFocusedWindow|inputDispatchTarget|mInputDispatchTarget|dispatchTarget)\s*[:=]\s*(.+)$') {
+            [pscustomobject]@{field=$matches[1];value=$matches[2].Trim();raw=$line.Trim()}
+        }
+    }
+}
+
+function Get-AndroidActiveTopPackages([string]$Text) {
+    $package='';$stateSeen=$false
+    foreach($line in ($Text -split "`r?`n")) {
+        if($line -match '^\s*ACTIVITY\s+(\S+)'){$package=Get-PackageFromComponent $matches[1];$stateSeen=$false;continue}
+        if($package -and -not $stateSeen -and $line -match '^\s*mResumed\s*[:=]\s*(true|false)\b') {
+            $stateSeen=$true
+            if($matches[1] -eq 'true') { Write-Output $package }
+        }
+    }
+}
+
+function ConvertTo-AndroidForegroundEvidence($Commands) {
+    $issues=New-Object 'Collections.Generic.List[string]'
+    $signals=New-Object 'Collections.Generic.List[object]'
+    $failed=@($Commands|Where-Object {$_.code -ne 0})
+    $text=@{};foreach($command in $Commands){$text[$command.source]=[string]$command.text}
+    foreach($key in @('power','activities','activityTop','windows','displays','policy','input','home')){if(-not$text.ContainsKey($key)){$text[$key]='';$issues.Add('명령 자료 누락: '+$key)}}
+    $wake=@(Get-AndroidNamedValues $text.power @('mWakefulness')|ForEach-Object value|Sort-Object -Unique)
+    $sleep=@(Get-AndroidNamedValues $text.activities @('isSleeping')|ForEach-Object value|Sort-Object -Unique)
+    $keyguard=@(Get-AndroidNamedValues $text.policy @('showing','mIsShowing','mKeyguardShowing')|ForEach-Object value|Sort-Object -Unique)
+    $screen=@(Get-AndroidNamedValues $text.policy @('screenState')|ForEach-Object value|Sort-Object -Unique)
+    foreach($line in ($text.power -split "`r?`n")){if($line-match 'Display Power:.*\bstate=(ON|OFF|DOZE|DOZE_SUSPEND)'){$screen+=$matches[1]}}
+    $screen=@($screen|ForEach-Object {$_ -replace '^SCREEN_STATE_',''}|Sort-Object -Unique)
+    $resolvedHome=@($text.home -split "`r?`n"|ForEach-Object {Get-PackageFromComponent $_}|Where-Object {$_}|Sort-Object -Unique)
+    $owners=@{};$token=''
+    foreach($line in ($text.windows -split "`r?`n")){
+        if($line-match '^\s*Window #\d+ Window\{([A-Za-z0-9]+)'){$token=$matches[1]}
+        if($token -and $line-match '\bmOwnerUid=.*\bpackage=([A-Za-z_][A-Za-z0-9_.]*)'){$owners[$token]=$matches[1]}
+    }
+    foreach($source in @('activities','windows','displays')){
+        $names=if($source-eq'activities'){@('topResumedActivity','mResumedActivity','ResumedActivity')}else{@('mCurrentFocus','mFocusedApp')}
+        foreach($value in @(Get-AndroidNamedValues $text[$source] $names)){
+            $package=Get-AndroidFocusPackage $value.value
+            $signals.Add([pscustomobject]@{source=$source;field=$value.field;package=$package;raw=$value.raw})
+            if($source-ne'activities' -and $value.field-eq'mCurrentFocus' -and $value.value-match 'Window\{([A-Za-z0-9]+)' -and $owners.ContainsKey($matches[1])){
+                $owner=$owners[$matches[1]];$signals.Add([pscustomobject]@{source=$source;field='focusOwner';package=$owner;raw=$value.raw})
+                if(-not$package){$package=$owner;$signals[$signals.Count-2].package=$package}
+            }
+            if(-not$package){$issues.Add('패키지 해석 실패: '+$source+'/'+$value.field+' '+$value.value)}
+        }
+    }
+    foreach($package in @(Get-AndroidActiveTopPackages $text.activityTop)){$signals.Add([pscustomobject]@{source='activityTop';field='activeActivity';package=$package;raw=$package})}
+    $inputText=$text.input
+    $history=[regex]::Match($inputText,'(?im)^\s*Input Dispatcher State at time of last ANR:')
+    if($history.Success){$inputText=$inputText.Substring(0,$history.Index)}
+    foreach($value in @(Get-AndroidInputFocusValues $inputText)){
+        $package=Get-AndroidFocusPackage $value.value
+        $signals.Add([pscustomobject]@{source='input';field=$value.field;package=$package;raw=$value.raw})
+        if(-not$package){$issues.Add('입력 패키지 해석 실패: '+$value.field+' '+$value.value)}
+    }
+    $inputWindow=@($signals|Where-Object {$_.source-eq'input' -and $_.field-match'^(FocusedWindows|focusedWindow|mFocusedWindow)$' -and $_.package}|ForEach-Object package|Sort-Object -Unique)
+    $rows=@($inputText-split"`r?`n"|Where-Object {$_-match'^\s*\d+:\s+name='})
+    $focusRowSeen=$false
+    foreach($row in $rows){
+        if($row-match '\binputConfig=([^,]+)'){$flags=$matches[1]}else{$issues.Add('입력 창 플래그 없음: '+$row.Trim());continue}
+        if($flags-match 'NOT_VISIBLE|NOT_TOUCHABLE|NO_INPUT_CHANNEL|\bSPY\b' -or $row-match '\balpha=0(?:\.0+)?\s*,' -or $row-match 'touchableRegion=<empty>'){continue}
+        $package=Get-AndroidFocusPackage $row
+        if($package -and $inputWindow -contains $package){$focusRowSeen=$true;break}
+        if($flags-match'0x' -and $flags.Trim()-ne'0x0'){$issues.Add('숫자 입력 플래그 판정 불가: '+$flags);continue}
+        if($package){$signals.Add([pscustomobject]@{source='input';field='interactiveOverlay';package=$package;raw=$row.Trim()})}
+        else{$issues.Add('전면 입력 창 소유자 해석 실패: '+$row.Trim())}
+    }
+    if($rows.Count -and $inputWindow.Count -and -not$focusRowSeen){$issues.Add('입력 focus와 현재 창 목록의 대응 불명확')}
+    $dispatch=@(Get-AndroidNamedValues $inputText @('DispatchEnabled','DispatchFrozen','mDispatchEnabled','mDispatchFrozen'))
+    return [pscustomobject]@{capturedAt=(Get-Date).ToUniversalTime().ToString('o');commands=@($Commands);failures=$failed;parseIssues=@($issues.ToArray());power=[pscustomobject]@{wakefulness=$wake;sleeping=$sleep;display=$screen;keyguard=$keyguard};signals=@($signals.ToArray());dispatch=$dispatch;homePackages=$resolvedHome;esdePackage='org.es_de.frontend'}
+}
+
+function Get-AndroidForegroundEvidence {
+    $definitions=@(
+        @{source='power';command='dumpsys power'},@{source='activities';command='dumpsys activity activities'},
+        @{source='activityTop';command='dumpsys activity top'},@{source='windows';command='dumpsys window windows'},
+        @{source='displays';command='dumpsys window displays'},@{source='policy';command='dumpsys window policy'},
+        @{source='input';command='dumpsys input'},@{source='home';command='cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME'})
+    $commands=@()
+    foreach($definition in $definitions){
+        try{$result=Invoke-Adb -s $Serial shell $definition.command;$commands+=[pscustomobject]@{source=$definition.source;command=$definition.command;code=$result.Code;text=$result.StdOut;error=$result.StdErr}}
+        catch{$commands+=[pscustomobject]@{source=$definition.source;command=$definition.command;code=-1;text='';error=$_.Exception.Message}}
+    }
+    return ConvertTo-AndroidForegroundEvidence $commands
+}
+
+function Evaluate-AndroidForegroundSafety($Evidence) {
+    $power=$Evidence.power
+    $status='unknown';$reason='';$package=''
+    $homeCandidates=@($Evidence.homePackages|Where-Object {$_ -notin @('android','com.android.systemui')})
+    $allowed=@($Evidence.esdePackage)+$homeCandidates
+    $third=@($Evidence.signals|Where-Object {$_.package -and $_.package -notin ($allowed+@('android','com.android.systemui'))})
+    if($power.wakefulness -contains 'Asleep' -or $power.wakefulness -contains 'Dozing' -or $power.wakefulness -contains 'Dreaming' -or $power.sleeping -contains 'true' -or $power.display -contains 'OFF' -or $power.display -contains 'DOZE' -or $power.display -contains 'DOZE_SUSPEND'){$status='unsafe';$reason='화면 꺼짐/수면/Dozing 상태'}
+    elseif($power.keyguard -contains 'true'){$status='unsafe';$reason='잠금 화면이 표시됨'}
+    elseif($third.Count){$status='unsafe';$reason='제3 앱 foreground 증거: '+(($third|ForEach-Object {$_.source+'/'+$_.field+'='+$_.package})-join'; ')}
+    elseif($Evidence.failures.Count){$reason='dumpsys/resolve 명령 실패: '+(($Evidence.failures|ForEach-Object {$_.source+' exit='+$_.code})-join'; ')}
+    elseif($Evidence.parseIssues.Count){$reason='해석 불완전: '+($Evidence.parseIssues-join'; ')}
+    elseif($power.wakefulness.Count-ne1 -or $power.wakefulness[0]-ne'Awake' -or $power.sleeping.Count-ne1 -or $power.sleeping[0]-ne'false' -or $power.display.Count-ne1 -or $power.display[0]-ne'ON' -or $power.keyguard.Count-ne1 -or $power.keyguard[0]-ne'false'){$reason='전원/화면/잠금 신호가 불명확하거나 서로 불일치'}
+    elseif($Evidence.homePackages.Count-ne1){$reason='HOME launcher 해석 불명확'}
+    elseif(@($Evidence.dispatch|Where-Object {($_.field-match'Enabled$' -and $_.value-ne'true') -or ($_.field-match'Frozen$' -and $_.value-ne'false')}).Count){$reason='입력 dispatch 비활성/정지 또는 불명확'}
+    elseif(@($Evidence.signals|Where-Object {$_.package -in @('android','com.android.systemui')}).Count){$reason='SystemUI/시스템 대화상자: 보수적으로 차단'}
+    else{
+        $activity=@($Evidence.signals|Where-Object {$_.source-eq'activities' -and $_.package}|ForEach-Object package|Sort-Object -Unique)
+        $window=@($Evidence.signals|Where-Object {$_.field-eq'mCurrentFocus' -and $_.package}|ForEach-Object package|Sort-Object -Unique)
+        $inputApp=@($Evidence.signals|Where-Object {$_.source-eq'input' -and $_.field-match'^(FocusedApplications|focusedApplication|mFocusedApplication)$' -and $_.package}|ForEach-Object package|Sort-Object -Unique)
+        $inputWindow=@($Evidence.signals|Where-Object {$_.source-eq'input' -and $_.field-match'^(FocusedWindows|focusedWindow|mFocusedWindow)$' -and $_.package}|ForEach-Object package|Sort-Object -Unique)
+        $all=@($Evidence.signals|Where-Object {$_.package}|ForEach-Object package|Sort-Object -Unique)
+        if($activity.Count-ne1 -or $window.Count-ne1 -or $inputApp.Count-ne1 -or $inputWindow.Count-ne1){$reason='필수 activity/current-window/input-application/input-window 증거 누락/중복'}
+        elseif($all.Count-ne1){$reason='activity/window/input 신호가 서로 불일치'}
+        elseif($all[0]-notin$allowed){$reason='확인된 패키지를 안전한 launcher로 검증할 수 없음'}
+        else{
+            $homeActivity=Get-AndroidComponent (($Evidence.commands|Where-Object source -eq 'home'|ForEach-Object text)-join' ')
+            $homeSignals=@($Evidence.signals|Where-Object {($_.source-eq'activities') -or ($_.field-eq'mCurrentFocus') -or ($_.source-eq'input' -and $_.field-match'^(FocusedApplications|focusedApplication|mFocusedApplication|FocusedWindows|focusedWindow|mFocusedWindow)$')})
+            $wrongHome=@($homeSignals|Where-Object {(Get-AndroidComponent $_.raw)-cne$homeActivity})
+            # HOME과 같은 패키지의 별도 게임 activity를 홈 화면으로 간주하지 않는다.
+            if($all[0]-cne$Evidence.esdePackage -and (-not$homeActivity -or $wrongHome.Count)){$reason='HOME 패키지는 일치하지만 실제 HOME component 합의가 없음'}
+            else{$status='safe';$package=$all[0];$reason='Awake/잠금 해제 및 activity+window+input이 '+$package+'에 합의'}
+        }
+    }
+    return [pscustomobject]@{status=$status;allowed=($status-eq'safe');package=$package;reason=$reason}
+}
+
+function Write-AndroidForegroundEvidence($Evidence,$Decision) {
+    Write-Log ('POWER: wakefulness='+($Evidence.power.wakefulness-join',')+' sleeping='+($Evidence.power.sleeping-join',')+' display='+($Evidence.power.display-join',')+' keyguard='+($Evidence.power.keyguard-join','))
+    foreach($signal in $Evidence.signals){Write-Log ($signal.source.ToUpperInvariant()+': '+$signal.field+'='+$signal.package+' raw='+$signal.raw)}
+    foreach($failure in $Evidence.failures){Write-Log ('COMMAND ERROR: '+$failure.source+' exit='+$failure.code+' '+$failure.error)}
+    foreach($issue in $Evidence.parseIssues){Write-Log ('PARSE ISSUE: '+$issue)}
+    Write-Log ('HOME: '+($Evidence.homePackages-join','))
+    Write-Log ('DECISION: '+$Decision.status.ToUpperInvariant()+' reason='+$Decision.reason)
 }
 
 function Get-ForegroundPackage {
-    $r = Invoke-Adb -s $Serial shell "dumpsys activity activities"
-    if ($r.Code -eq 0) {
-        foreach ($line in $r.Output) {
-            $s = [string]$line
-
-            if ($s -match 'topResumedActivity=.*?([A-Za-z0-9._-]+)/[A-Za-z0-9._$-]+') {
-                Write-Log "FOREGROUND DETECTION: topResumedActivity"
-                return $matches[1]
-            }
-
-            if ($s -match 'mResumedActivity=.*?([A-Za-z0-9._-]+)/[A-Za-z0-9._$-]+') {
-                Write-Log "FOREGROUND DETECTION: mResumedActivity"
-                return $matches[1]
-            }
-        }
-    }
-
-    $w = Invoke-Adb -s $Serial shell "dumpsys window windows"
-    if ($w.Code -eq 0) {
-        foreach ($line in $w.Output) {
-            $s = [string]$line
-            if (($s -match 'mCurrentFocus=.*?([A-Za-z0-9._-]+)/[A-Za-z0-9._$-]+') -or
-                ($s -match 'mFocusedApp=.*?([A-Za-z0-9._-]+)/[A-Za-z0-9._$-]+')) {
-                Write-Log "FOREGROUND DETECTION: window focus"
-                return $matches[1]
-            }
-        }
-    }
-
-    Write-Log "FOREGROUND DETECTION: none"
-    return ""
+    # 이전 호출자를 위한 호환 함수. 안전 합의가 없으면 패키지를 반환하지 않는다.
+    $evidence=Get-AndroidForegroundEvidence;$decision=Evaluate-AndroidForegroundSafety $evidence
+    Write-AndroidForegroundEvidence $evidence $decision
+    if($decision.allowed){return $decision.package};return ''
 }
 
 function Get-HomePackage {
@@ -164,41 +327,18 @@ function Get-HomePackage {
 }
 
 function Preflight-CheckForeground {
-    Write-Status "preflight" "실행 중인 게임을 확인하는 중..." 0 1
-
-    $foreground = Get-ForegroundPackage
-    $homePackage = Get-HomePackage
-
-    if ($homePackage) {
-        Write-Log "HOME PACKAGE: $homePackage"
+    Write-Status 'preflight' '화면·잠금·실행 중인 앱을 확인하는 중...' 0 1
+    $previous=''
+    # 순차 dumpsys 수집 사이의 전환을 보수적으로 처리하기 위해 안전 합의를 재확인한다.
+    foreach($pass in 1..2){
+        $evidence=Get-AndroidForegroundEvidence;$decision=Evaluate-AndroidForegroundSafety $evidence
+        Write-AndroidForegroundEvidence $evidence $decision
+        if(-not$decision.allowed){Write-Log ('PREFLIGHT BLOCK: '+$decision.status+' '+$decision.reason);throw ('안전한 foreground를 확인할 수 없어 동기화를 차단합니다: '+$decision.reason)}
+        if($previous -and $previous-cne$decision.package){Write-Log 'PREFLIGHT BLOCK: launcher changed between samples';throw '검사 중 foreground가 변경되어 동기화를 차단합니다.'}
+        $previous=$decision.package
     }
-
-    if (-not $foreground) {
-        Write-Log "PREFLIGHT BLOCK: foreground package unknown"
-        throw "현재 실행 중인 앱을 확인할 수 없어 안전을 위해 동기화를 중단했습니다."
-    }
-
-    Write-Log "FOREGROUND PACKAGE: $foreground"
-
-    $allowed = @(
-        "org.es_de.frontend",
-        "com.android.systemui",
-        "com.android.launcher3"
-    )
-
-    if ($homePackage) {
-        $allowed += $homePackage
-    }
-
-    if ($allowed -contains $foreground) {
-        Write-Log "PREFLIGHT OK: foreground is ES-DE/home/system UI"
-        return
-    }
-
-    Write-Log "PREFLIGHT BLOCK: game/emulator or other app is running"
-    throw "게임 또는 다른 앱이 실행 중입니다. 게임을 종료하고 ES-DE 화면으로 돌아온 뒤 다시 동기화해 주세요. 감지된 앱: $foreground"
+    Write-Log ('PREFLIGHT OK: stable activity/window/input consensus on '+$previous)
 }
-
 function Stop-Esde {
     Write-Status "stopping" "ES-DE를 종료하는 중..." 0 1
     Write-Log "STOP APP [ES-DE] org.es_de.frontend"
