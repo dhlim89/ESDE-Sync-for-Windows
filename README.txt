@@ -1,4 +1,4 @@
-﻿ES-DE Sync for Android v1.4.9 Development
+﻿ES-DE Sync for Android v1.5.0 Development
 ======================================
 
 프로그램
@@ -293,3 +293,12 @@ v1.4.8에서 v1.4.9로 실제 앱 내 업데이트는 아직 실행하지 않았
 다른 vendor, USB 단절/강제 종료 후 수동 복구, 대규모 hash/staging 비용은 남은 확인 사항입니다.
 media rollback 범위는 media 전용이며 ROM/gamelist 전체 transaction 복원은 아닙니다.
 RC 준비는 정식 Release 게시가 아니며 승인 없이 main/tag/Release를 변경하지 않습니다.
+
+[v1.5.0 Stage 1 개발 — 정식 Release 아님]
+- 동일 managed path의 Android playcount/lastplayed/playtime만 tag 단위 보존. 기타 일반 metadata는 기존 Dropbox 기준.
+- game-level altemulator 변환 순수 함수/GB·GBC 확인 mapping 추가. top-level alternativeEmulator는 변경하지 않음.
+- _UNREGISTERED adoption은 경로/hash 계획과 삭제 gate만 존재. 실제 pull/Dropbox 채택/원본 삭제는 연결하지 않음.
+- 현재 _TEST/_UNREGISTERED ROM 보호, foreground, media ownership/journal, updater App 8개 계약 유지.
+- GUI client 740x670 / 96 DPI 기준 Dpi autoscale / 경로 4줄 84px / update y=316으로 겹침 해소.
+- channel=stable 및 숫자 releaseTag는 기존 validator의 패키지 계약이다. 개발 tree가 자동으로 공개되는 의미는 아니며 tag/Release 생성 없음.
+- 자세한 Stage 1 명세는 docs/v150-stage1-design.md. 미확정 사용자 preference 태그/다른 mapping은 추측하지 않음.

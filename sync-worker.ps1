@@ -787,6 +787,147 @@ function ConvertTo-EsdeGamelistBytes($Gamelist) {
     return ,$bytes
 }
 
+function Merge-EsdeRuntimeGameTags([System.Xml.XmlElement]$Destination,[System.Xml.XmlElement]$Android) {
+    $changed=$false
+    foreach($tag in @('playcount','lastplayed','playtime')){
+        $local=@($Android.SelectNodes($tag));$base=@($Destination.SelectNodes($tag))
+        if($local.Count-gt1 -or $base.Count-gt1){throw ('runtime tag 중복: '+$tag)}
+        if($local.Count-eq0){continue}
+        $import=$Destination.OwnerDocument.ImportNode($local[0],$true)
+        if($base.Count-eq1){
+            if($base[0].OuterXml-ceq$import.OuterXml){continue}
+            [void]$Destination.ReplaceChild($import,$base[0])
+        }else{[void]$Destination.AppendChild($import)}
+        $changed=$true
+    }
+    return $changed
+}
+
+function Get-AndroidAltemulatorMappings {
+    # 사용자 확정 전환 + 설치 APK Android/공식 Linux label로 확인된 항목만.
+    return @(
+        [pscustomobject]@{System='gb';Linux='SameBoy (Standalone)';Android='My OldBoy! (Standalone)'},
+        [pscustomobject]@{System='gbc';Linux='Sameboy (Standalone)';Android='My OldBoy! (Standalone)'}
+    )
+}
+
+function Convert-EsdeAndroidAltemulators($Gamelist,[string]$System,[Parameter(Mandatory=$true)][bool]$IsArcade,[object[]]$Mappings=(Get-AndroidAltemulatorMappings),[scriptblock]$Warning) {
+    if($null-eq$Gamelist){return $null}
+    $result=ConvertFrom-EsdeGamelistBytes $Gamelist.Bytes 'Android emulator staging'
+    $changed=$false
+    foreach($entry in @(Get-EsdeGameEntries $result)){
+        # 기존 local-only 노드는 whole-node 보호를 유지한다.
+        if($entry.Class-ne'Managed'){continue}
+        $nodes=@($entry.Node.SelectNodes('altemulator'))
+        if($nodes.Count-gt1){throw 'altemulator 중복'}
+        if(-not$nodes.Count -or $IsArcade){continue}
+        $value=$nodes[0].InnerText
+        if($value-notmatch'\(Standalone\)'){
+            [void]$entry.Node.RemoveChild($nodes[0]);$changed=$true;continue
+        }
+        $confirmed=@($Mappings|Where-Object {$_.System-ieq$System})
+        if(@($confirmed|Where-Object {$_.Android-ceq$value}).Count){continue}
+        $matches=@($confirmed|Where-Object {$_.Linux-ieq$value})
+        if($matches.Count-ne1){
+            if($Warning){& $Warning ('미확정 altemulator mapping: '+$System+' / '+$value)|Out-Null}
+            throw ('미확정 standalone mapping: '+$System+' / '+$value)
+        }
+        $nodes[0].InnerText=$matches[0].Android;$changed=$true
+    }
+    $result.Bytes=if($changed){ConvertTo-EsdeGamelistBytes $result}else{$Gamelist.Bytes}
+    return $result
+}
+
+function Get-UnregisteredAdoptionPath([string]$System,[string]$RelativePath,[string[]]$SelectedSystems) {
+    if($System-notmatch'^[a-zA-Z0-9_-]+$' -or $SelectedSystems-cnotcontains$System){throw 'adoption 선택 시스템 밖'}
+    if($System-match'^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$' -or $System-in@('_TEST','_UNREGISTERED')){throw 'adoption 시스템 이름 안전 오류'}
+    if(-not$RelativePath -or $RelativePath-match'^[\\/]|:|[\x00-\x1f\x7f]'){throw 'adoption 상대 경로 오류'}
+    $relative=$RelativePath.Replace('\','/')
+    if($relative.StartsWith('./')){$relative=$relative.Substring(2)}
+    $parts=@($relative-split'/')
+    if($parts.Count-lt2 -or $parts[0]-ine'_UNREGISTERED'){throw '_UNREGISTERED inbox만 채택 가능'}
+    foreach($part in $parts){
+        if($part-in@('','.','..') -or $part-match'[<>:"|?*]|[ .]$' -or $part-match'^(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)'){throw 'adoption Windows/path 안전 규칙 위반'}
+    }
+    $destination=$parts[1..($parts.Count-1)]-join'/'
+    if(@($parts[1..($parts.Count-1)]|Where-Object {$_-ieq'_TEST' -or $_-ieq'_UNREGISTERED'}).Count){throw '중첩 예약 경로 채택 금지'}
+    return [pscustomobject]@{System=$System;InboxPath='./'+$relative;ManagedPath='./'+$destination;DestinationRelativePath=$destination}
+}
+
+function New-UnregisteredAdoptionPlan([object[]]$Candidates,[object[]]$Destinations,[string[]]$SelectedSystems,[hashtable]$RomExtensions=@{gb=@('.gb','.gbc','.dmg','.gbx','.bs','.cgb','.sgb','.sfc','.smc','.zip','.7z');gbc=@('.gb','.gbc','.dmg','.gbx','.bs','.cgb','.sgb','.sfc','.smc','.zip','.7z')}) {
+    # 전달된 hash snapshot만 검증한다. ROM 읽기/쓰기/pull/delete는 수행하지 않는다.
+    $destinationMap=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($destination in $Destinations){
+        $info=Get-UnregisteredAdoptionPath $destination.System ('_UNREGISTERED/'+$destination.RelativePath) $SelectedSystems
+        $key=$info.System+'/'+$info.DestinationRelativePath
+        if($destination.Sha256-notmatch'^[a-fA-F0-9]{64}$' -or $destinationMap.ContainsKey($key)){throw 'Dropbox snapshot hash/중복 오류'}
+        $destinationMap.Add($key,$destination)
+    }
+    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $plan=New-Object 'Collections.Generic.List[object]'
+    foreach($candidate in $Candidates){
+        $info=Get-UnregisteredAdoptionPath $candidate.System $candidate.RelativePath $SelectedSystems
+        if(-not$RomExtensions.ContainsKey($candidate.System) -or $RomExtensions[$candidate.System]-notcontains[IO.Path]::GetExtension($info.DestinationRelativePath)){throw '확인된 ES-DE ROM extension 밖'}
+        $key=$info.System+'/'+$info.DestinationRelativePath
+        if(-not$seen.Add($key)){throw 'adoption 목적지 대소문자 충돌'}
+        if($candidate.AndroidSha256-notmatch'^[a-fA-F0-9]{64}$' -or $candidate.StagedSha256-notmatch'^[a-fA-F0-9]{64}$' -or $candidate.AndroidSha256-ine$candidate.StagedSha256){throw 'adoption pull/hash 검증 실패'}
+        $action='InstallNew';$canonical=$info.DestinationRelativePath
+        if($destinationMap.ContainsKey($key)){
+            if($destinationMap[$key].Sha256-ine$candidate.StagedSha256){throw ('adoption 목적지 SHA 충돌: '+$key)}
+            $action='ReuseIdentical'
+            # Windows 동일 경로의 기존 실제 표기를 사용해 Android case-sensitive ROM/path를 맞춘다.
+            $canonical=$destinationMap[$key].RelativePath.Replace('\','/')
+        }
+        $plan.Add([pscustomobject]@{System=$info.System;InboxPath=$info.InboxPath;ManagedPath='./'+$canonical;DestinationRelativePath=$canonical;Sha256=$candidate.StagedSha256.ToLowerInvariant();Action=$action;RemoveAndroidSource=$false})
+    }
+    return @($plan.ToArray())
+}
+
+function New-AdoptionGamePromotion([System.Xml.XmlElement]$AndroidInbox,[string]$ManagedPath,[System.Xml.XmlElement]$DropboxManaged,[System.Xml.XmlElement]$AndroidManaged) {
+    # 순수 node proposal. ROM 성공/journal 검증 및 파일 교체는 이 함수 밖의 Stage 2 책임.
+    $target=Get-EsdeGamePathInfo $ManagedPath
+    if($target.Class-ne'Managed'){throw 'adoption 승격 target은 managed path여야 함'}
+    if($AndroidInbox){
+        $old=Get-EsdeGamePathInfo $AndroidInbox.SelectSingleNode('path').InnerText
+        if($old.Class-ne'LocalUnregistered'){throw 'adoption metadata는 _UNREGISTERED만'}
+        $prefix='./_UNREGISTERED/'
+        if(-not$old.Key.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or -not[string]::Equals($target.Key,('./'+$old.Key.Substring($prefix.Length)),[StringComparison]::OrdinalIgnoreCase)){throw 'inbox/정식 path 승격 관계 불일치'}
+    }
+    if($AndroidManaged -and $AndroidInbox){
+        foreach($tag in @('playcount','lastplayed','playtime')){
+            $a=$AndroidManaged.SelectSingleNode($tag);$b=$AndroidInbox.SelectSingleNode($tag)
+            if(($null-ne$a)-ne($null-ne$b) -or ($a -and $a.InnerText-cne$b.InnerText)){throw 'Android 정식/예약 path runtime 충돌'}
+        }
+    }
+    foreach($node in @($DropboxManaged,$AndroidManaged)|Where-Object {$_}){
+        if((Get-EsdeGamePathInfo $node.SelectSingleNode('path').InnerText).Key-cne$target.Key){throw '정식 game target path 불일치'}
+    }
+    if(-not$AndroidInbox -and -not$DropboxManaged){return [pscustomobject]@{DropboxNode=$null;AndroidNode=$null;NeedsPolicyDecision=$false;CreateGame=$false}}
+    $source=if($DropboxManaged){$DropboxManaged.CloneNode($true)}else{$AndroidInbox.CloneNode($true)}
+    $source.SelectSingleNode('path').InnerText=$target.Key
+    $pending=@()
+    if(-not$DropboxManaged){
+        # 기기 플레이 기록은 공유 DB의 새 node로 승격시키지 않는다.
+        foreach($tag in @('playcount','lastplayed','playtime')){foreach($node in @($source.SelectNodes($tag))){[void]$source.RemoveChild($node)}}
+        # 공유 여부가 미확정인 preference/platform/media field가 있으면 실제 commit을 차단해야 한다.
+        $pending=@($source.ChildNodes|Where-Object {$_.NodeType-eq[Xml.XmlNodeType]::Element -and $_.Name-in@('favorite','hidden','kidgame','broken','completed','hidemetadata','altemulator','image','thumbnail','marquee','fanart','video','manual','controller','screen')}|ForEach-Object Name)
+    }
+    $android=if($DropboxManaged){$source.CloneNode($true)}else{$AndroidInbox.CloneNode($true)}
+    $android.SelectSingleNode('path').InnerText=$target.Key
+    if($AndroidInbox){[void](Merge-EsdeRuntimeGameTags $android $AndroidInbox)}
+    return [pscustomobject]@{DropboxNode=$source;AndroidNode=$android;NeedsPolicyDecision=($pending.Count-gt0);PendingFields=$pending;CreateGame=$true}
+}
+
+function Get-AdoptionSourceRemovalDecision([string]$State,[bool]$DropboxRomVerified,[bool]$DropboxGamelistVerified,[bool]$AndroidGamelistVerified,[bool]$SourceUnchanged,[bool]$AndroidManagedRomVerified=$false,[bool]$PolicyResolved=$false) {
+    return ($State-ceq'android-gamelist-installed' -and $DropboxRomVerified -and $DropboxGamelistVerified -and $AndroidGamelistVerified -and $SourceUnchanged -and $AndroidManagedRomVerified -and $PolicyResolved)
+}
+
+function Get-AdoptionResumeDisposition([string]$State) {
+    if($State-ceq'completed'){return 'VerifyCompleted'}
+    if($State-in@('discovered','staged','source-verified','dropbox-installed','gamelist-prepared','dropbox-gamelist-installed','android-rom-installed','android-gamelist-installed','android-source-removed','failed')){return 'BlockedManualReview'}
+    throw '알 수 없는 adoption journal state'
+}
+
 function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning) {
     $warnings=New-Object 'Collections.Generic.List[string]'
     $emit={param($message)$warnings.Add($message);if($Warning){& $Warning $message|Out-Null}}.GetNewClosure()
@@ -809,6 +950,12 @@ function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning) {
         if($keys.ContainsKey($info.Key)){
             [void]$list.RemoveChild($node);$changed=$true;& $emit ('Dropbox 중복 path: '+$info.Key)
         }else{$keys.Add($info.Key,$node)}
+    }
+    # 일반 노드는 Dropbox 기준을 유지하고 Android runtime 3개 태그만 이식한다.
+    $managedKeys=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($entry in @(Get-EsdeGameEntries $Local $emit|Where-Object Class -eq Managed)){
+        if(-not$managedKeys.Add($entry.Key)){throw ('Android managed path 중복: '+$entry.Key)}
+        if($keys.ContainsKey($entry.Key) -and (Merge-EsdeRuntimeGameTags $keys[$entry.Key] $entry.Node)){$changed=$true}
     }
     $localKeys=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach($entry in $localEntries){
