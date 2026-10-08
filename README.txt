@@ -213,3 +213,20 @@ ES-DE 이외 HOME은 실제 HOME component까지 합의해야 합니다.
 각 신호 원문과 판정 이유를 기록합니다. vendor별 미지원 출력은 차단될 수 있습니다.
 동기화/삭제/예약 폴더/gamelist/updater 동작은 유지합니다.
 모의 검증: powershell.exe -NoProfile -File .\tests\foreground-static.ps1
+
+v1.4.9 stage 2: gamelist metadata 병합 기반
+------------------------------------------
+gamelist-common.ps1은 독립 모듈이며 현재 sync-worker에는 연결되지 않았습니다.
+ROM 파일과 metadata를 분리합니다. 엔트리 없는 ROM에 새 game을 만들지 않습니다.
+Dropbox 일반 metadata를 유지하고 Android의 기존 _TEST/_UNREGISTERED game
+전체 노드만 병합합니다. 예약 폴더는 경로의 어느 구성요소에 있어도 로컬 전용입니다.
+예약 이름은 기존 worker처럼 대소문자를 무시하며, Android 파일 경로 key는
+대소문자를 구분합니다. 동일 로컬 key는 Android 우선, 중복은 첫 항목을 보존하고
+Dropbox 예약 경로/충돌은 warning으로 기록합니다. invalid path는 전체 병합을 중단합니다.
+alternativeEmulator와 gameList가 나란한 구조를 메모리 wrapper로 파싱하고,
+출력에서 wrapper를 제거합니다. Dropbox top-level 순서와 알 수 없는 필드를 유지합니다.
+Dropbox가 없으면 기존 Android 로컬 엔트리가 있을 때만 파일을 만들 수 있습니다.
+이 경우 Android top-level 구조를 사용하되 일반 game은 승격하지 않습니다.
+출력은 재파싱한 새 PC staging 파일만 허용하며 원본/기존 파일 덮어쓰기를 거부합니다.
+ROM 채택/이동, 미디어 파일 보호, 실제 Android pull/push 연결은 아직 구현하지 않았습니다.
+검증: powershell.exe -NoProfile -File .\tests\gamelist-merge-static.ps1
