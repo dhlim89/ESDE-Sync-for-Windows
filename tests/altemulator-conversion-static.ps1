@@ -11,7 +11,8 @@ function AltDoc($value,$path='./a.gb'){Doc ('<alternativeEmulator><label>SameBoy
 $source=AltDoc 'Sameboy (Standalone)'
 $original=[Convert]::ToBase64String($source.Bytes)
 foreach($system in @('gb','gbc')){
- $result=Convert-EsdeAndroidAltemulators $source $system $false
+ $input=if($system-ceq'gb'){AltDoc 'SameBoy (Standalone)'}else{$source}
+ $result=Convert-EsdeAndroidAltemulators $input $system $false
  Check ($result.Document.DocumentElement.SelectSingleNode('gameList/game/altemulator').InnerText-ceq'My OldBoy! (Standalone)') ($system+' confirmed mapping')
  Check ($result.Document.DocumentElement.SelectSingleNode('alternativeEmulator/label').InnerText-ceq'SameBoy') 'top-level와 game-level 구분'
  Check ($result.Document.DocumentElement.SelectSingleNode('gameList/game/unknown').InnerText-ceq'keep') 'unknown field 보존'
@@ -33,4 +34,5 @@ Check ($script:Warnings.Count-eq1) '미확정 mapping warning'
 $local=AltDoc 'Unknown (Standalone)' './_TEST/a.gb'
 Check ([Convert]::ToBase64String((Convert-EsdeAndroidAltemulators $local 'gb' $false).Bytes)-ceq[Convert]::ToBase64String($local.Bytes)) '예약 node 변환하지 않음'
 Reject '중복 altemulator' {Convert-EsdeAndroidAltemulators (Doc '<gameList><game><path>./a.gb</path><altemulator>x</altemulator><altemulator>y</altemulator></game></gameList>') 'gb' $false}
+Reject 'GB label 대소문자 미확정' {Convert-EsdeAndroidAltemulators (AltDoc 'Sameboy (Standalone)') 'gb' $false}
 Write-Output ('altemulator 검증 완료: '+$script:Passed)

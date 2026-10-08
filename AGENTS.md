@@ -6,7 +6,7 @@
 
 ## 구성과 실행 환경
 
-현재 개발 기준은 **v1.5.0 Stage 1** (stable 기준 v1.4.9)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
+현재 개발 기준은 **v1.5.0 Stage 2 개발** (stable 기준 v1.4.9)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
 
 - `ESDE-Sync.ps1`: Windows Forms GUI, ADB 및 worker 실행.
 - `sync-worker.ps1`: ROM mirror, foreground 검사, gamelist 병합, media ownership의 runtime 원본.
@@ -54,3 +54,10 @@ _TEST는 inbox가 아니다. 기존 _UNREGISTERED mirror 제외를 약화시키�
 game-level altemulator의 staging 변환과 top-level alternativeEmulator를 구분한다. 미확정 mapping/공유 preference 정책은 차단한다.
 GUI layout은 Get-EsdeGuiLayout이 단일 원본이며 96 DPI Dpi autoscale와 100%/125% 검증을 유지한다.
 실제 Android/Dropbox adoption, 설치, commit/push/main/tag/Release 변경은 사용자 승인 전 수행하지 않는다.
+## v1.5.0 Stage 2 현재 경계
+Stage 1 섹션은 checkpoint 당시 범위이다. 현재 연결은 docs/v150-stage2-executor.md를 참조한다.
+일반 unmanaged ROM은 실제 목록 기반 보존 wrapper로 관리 ROM과 분리한다. 기존 mirror/공통 삭제 본문은 유지한다.
+adoption은 _UNREGISTERED inbox만 처리하며 journal/충돌/공유 정책 gate가 통과해야 실행한다.
+Android system-level alternativeEmulator 전체 subtree를 보존하고 game-level 변환은 staging에만 적용한다.
+실패한 adoption은 새 canonical/XML을 자동 rollback하지 않는다. cleanup 실패 보상은 삭제된 inbox 복사본에만 한정한다.
+미완료/손상 journal은 수동 검토 전 새 mutation을 차단한다. 실제 Android/Dropbox adoption은 이번 Stage에서 실행하지 않는다.

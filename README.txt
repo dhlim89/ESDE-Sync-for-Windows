@@ -302,3 +302,22 @@ RC 준비는 정식 Release 게시가 아니며 승인 없이 main/tag/Release�
 - GUI client 740x670 / 96 DPI 기준 Dpi autoscale / 경로 4줄 84px / update y=316으로 겹침 해소.
 - channel=stable 및 숫자 releaseTag는 기존 validator의 패키지 계약이다. 개발 tree가 자동으로 공개되는 의미는 아니며 tag/Release 생성 없음.
 - 자세한 Stage 1 명세는 docs/v150-stage1-design.md. 미확정 사용자 preference 태그/다른 mapping은 추측하지 않음.
+[v1.5.0 Stage 2 개발 — 실환경 adoption 미실행]
+- Android-bound gamelist는 관리본 metadata와 Android runtime 3개 태그를 병합한 뒤 변환합니다.
+- Android system-level alternativeEmulator는 attributes/comments/children/empty를 포함한 전체 subtree를 보존합니다.
+- GB SameBoy (Standalone), GBC Sameboy (Standalone)만 My OldBoy! (Standalone)으로 변환합니다.
+- 확인된 arcade platform은 그대로 유지하며 neogeo 계열은 미확정 로그 후 변환을 생략합니다.
+- 일반 Android-only unmanaged ROM은 실제 ROM 목록을 기준으로 보존하고 XML node가 있을 때만 whole-node를 보존합니다.
+- 기존 Mirror-SystemFolder의 본문/공통 삭제는 그대로이며 호출 wrapper에서 unmanaged를 삭제 비교에서 제외합니다.
+- State/managed-rom-paths에는 성공적으로 동기화한 관리 경로를 기록해 이후 source 삭제의 관리 범위를 구분합니다.
+- 자동 채택은 선택 시스템의 root _UNREGISTERED inbox에만 적용하며 현재 검증된 ROM extension은 GB/GBC에 한정됩니다.
+- 전체 계획/충돌/정책 검증 후 journal → Dropbox ROM/XML → Android ROM/XML → 최종 검증 → inbox 삭제 순서입니다.
+- 공유 신규 game에는 Android runtime 3개 태그를 복제하지 않습니다. 기존 game이 없으면 ROM만 채택하며 game을 합성하지 않습니다.
+- preference/platform/media 공유가 필요하지만 미확정이면 mutation 전에 차단합니다.
+- source/Android XML fingerprint를 재확인하고 staging/검증/atomic replacement를 사용합니다.
+- State/adoption-transactions/<source-device identity>/ journal이 손상/미완료이면 새 mutation을 차단합니다.
+- 실패 시 생성한 canonical ROM/XML을 자동 삭제/rollback하지 않고 journal 및 PC staging을 보존합니다.
+- 마지막 cleanup/완료 기록 실패에는 이미 삭제한 inbox만 SHA 검증 복사본으로 보상합니다. 기존 canonical/XML과 다른 사용자 파일은 변경하지 않습니다.
+- 보상 전송도 실패하면 fatal 로그/journal과 PC 원본 복사본을 보존하고 수동 검토가 필요합니다. 자동 crash recovery/resume는 없습니다.
+- mock/fixture 시험만 수행했습니다. 실제 Android/Dropbox adoption, 설치 및 Stage 2 commit/push는 수행하지 않았습니다.
+- 자세한 transaction 경계/실기기 전제는 docs/v150-stage2-executor.md를 참조하십시오.
