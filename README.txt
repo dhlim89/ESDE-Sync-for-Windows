@@ -180,7 +180,7 @@ v1.4.8 2차 개발 — 안전한 App 적용
 - 미완료 세션 복구 명령(기존 GUI/sync가 종료된 상태에서 실행):
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<AppRoot>\.Updates\<sessionId>\update-worker.ps1" -AppRoot "<AppRoot>" -SessionPath "<AppRoot>\.Updates\<sessionId>"
 - rollback_failed에서는 backup/App과 update.log를 보존하고 경로/잠금 원인을 확인한 뒤 재시도합니다.
-- 실제 설치 폴더/Windows Forms/Android/실제 GitHub Release 업데이트는 아직 검증하지 않았습니다.
+- 위 미검증 범위는 stage 2 당시 기록입니다. 이후 설치/GUI/rollback과 Android 회귀를 검증했으며 실제 GitHub Release 업데이트는 별도 확인 사항입니다.
 - 로컬 트랜잭션 검증: powershell.exe -NoProfile -File .\tests\update-transaction.ps1
 - 2차 패키지에는 App 파일 8개와 설치/제거/README 5개, package-manifest.json을 포함합니다.
 - GUI 종료의 ADB 경로를 선택된 script:Adb로 연결해 kill-server 동작을 유지합니다(가짜 실행 파일로 검증).
@@ -228,7 +228,7 @@ alternativeEmulator와 gameList가 나란한 구조를 메모리 wrapper로 파�
 Dropbox가 없으면 기존 Android 로컬 엔트리가 있을 때만 파일을 만들 수 있습니다.
 이 경우 Android top-level 구조를 사용하되 일반 game은 승격하지 않습니다.
 출력은 재파싱한 새 PC staging 파일만 허용하며 원본/기존 파일 덮어쓰기를 거부합니다.
-ROM 채택/이동, 미디어 파일 보호, 실제 Android pull/push 연결은 아직 구현하지 않았습니다.
+stage 2 당시 ROM 채택/이동, 미디어 보호, Android 연결은 미구현이었습니다. 이후 gamelist 연결은 stage 3, media ownership 보호는 stage 5에 구현했습니다. ROM 자동 채택/이동은 아직 없습니다.
 검증: powershell.exe -NoProfile -File .\tests\gamelist-merge-static.ps1
 
 v1.4.9 stage 3: gamelist worker 연결
@@ -273,5 +273,23 @@ State/media-transactions에 durable journal과 백업을 기록합니다. 강제
 정상 종료 또는 성공한 rollback은 source/backup/hash 임시 파일을 정리하고 journal은 유지합니다.
 전체 source hash/staging 준비는 시간과 State 여유 공간이 필요합니다.
 ROM/gamelist/foreground/공통 삭제/updater 실행 로직 및 App 8개 패키지 계약은 유지합니다.
-실제 Android 적용은 아직 미검증입니다.
+stage 5 구현 직후에는 실제 Android 적용이 미검증이었으며 아래 Phase A/B에서 확인했습니다.
 모의 검증: powershell.exe -NoProfile -File .\tests\media-ownership-static.ps1
+
+v1.4.9 Release Candidate 검증 현황
+---------------------------------
+Retroid Pocket Mini V2에서 media Phase A와 전체 worker Phase B를 통과했습니다.
+Phase A: unmanaged 보존/동일 SHA 자동 채택 금지/충돌 차단, managed 배포·갱신·삭제,
+Android 수정본 보호, 전송 및 manifest 저장 실패 시 역순 rollback을 확인했습니다.
+Phase B: 격리된 uzebox만 선택해 production worker 진입점으로 ROM/gamelist/media를
+검증했습니다. ExitCode=0/status=done/journal=completed, ES-DE 종료·복귀와 SAFE,
+동일 원본 재실행의 ROM/media 재전송 없음 및 metadata/ownership 중복 없음을 확인했습니다.
+시험 후 생성한 파일과 ownership만 정리해 원래 스냅샷으로 복원했고,
+비선택 GB와 production State는 변경되지 않았습니다. 설치본은 v1.4.8을 유지했습니다.
+초기 중단은 임시 시험 스크립트의 객체 Count/반환 필드/ExitCode/경로 배열 문제였으며
+production 수정 없이 보정하고 모든 시험 및 최종 정리를 완료했습니다.
+전체 회귀 테스트와 tag v1.4.8 실제 validator를 통한 RC 패키지 검증을 유지합니다.
+v1.4.8에서 v1.4.9로 실제 앱 내 업데이트는 아직 실행하지 않았습니다.
+다른 vendor, USB 단절/강제 종료 후 수동 복구, 대규모 hash/staging 비용은 남은 확인 사항입니다.
+media rollback 범위는 media 전용이며 ROM/gamelist 전체 transaction 복원은 아닙니다.
+RC 준비는 정식 Release 게시가 아니며 승인 없이 main/tag/Release를 변경하지 않습니다.

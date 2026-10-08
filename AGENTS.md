@@ -1,50 +1,49 @@
 # Repository Guidelines
 
-## 언어 및 작업 원칙
+## 언어와 변경 원칙
 
-- 모든 사용자 대화, 분석, 설명, 작업 보고는 한국어로 작성한다.
-- 코드 식별자, 함수명, 파일명, 명령어, 로그 원문은 필요한 경우 영어 그대로 유지한다.
-- 정상 동작하는 코드를 불필요하게 재작성하지 않는다. 변경은 최소 범위로 수행하고 새 로직은 작은 함수로 나눈다.
-- 기존 RG Cube 정상 동작을 보존한다. 변경 후 `README.txt`와 버전 정보를 갱신한다.
+모든 대화·분석·작업 보고는 한국어로 작성한다. 식별자, 파일명, 명령어, 로그 원문은 필요하면 영어를 유지한다. 정상 코드를 불필요하게 재작성하지 말고 변경을 작은 함수로 제한한다. 기존 사용자 데이터·설정·프로필과 RG Cube 정상 동작을 보존한다. 동작 변경 시 README와 버전 계약을 함께 검토한다.
 
-## 프로젝트 구성 및 실행 환경
+## 구성과 실행 환경
 
-Windows PowerShell 기반 GUI 앱 **ES-DE Sync**는 Dropbox의 ES-DE 라이브러리를 ADB로 Android 기기에 동기화한다. 현재 기준 버전은 **v1.4.4 Final**이다.
+현재 개발 기준은 **v1.4.9**이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
 
-- `ESDE-Sync.ps1`: GUI 애플리케이션.
-- `sync-worker.ps1`: 동기화 작업자.
-- `install.ps1`, `install.cmd`: 설치 스크립트 및 실행 진입점.
-- `uninstall.ps1`, `uninstall.cmd`: 제거 스크립트 및 실행 진입점.
-- `README.txt`: 사용 및 변경 안내.
+- `ESDE-Sync.ps1`: Windows Forms GUI, ADB 및 worker 실행.
+- `sync-worker.ps1`: ROM mirror, foreground 검사, gamelist 병합, media ownership의 runtime 원본.
+- `update-common.ps1`, `update-transaction.ps1`, `update-worker.ps1`: 패키지 검증, App 교체·백업·rollback.
+- `install.ps1`/`install.cmd`, `uninstall.ps1`/`uninstall.cmd`: 설치·제거 진입점.
+- `scripts/package-release.ps1`, `tests/*.ps1`: 패키징과 회귀 검증.
 
-설치 경로는 `%LOCALAPPDATA%\ESDE-Sync`이다. 로그는 `%LOCALAPPDATA%\ESDE-Sync\State\sync.log`, 상태는 `%LOCALAPPDATA%\ESDE-Sync\State\status.json`에 저장한다. ADB 경로는 `%LOCALAPPDATA%\ESDE-Sync\platform-tools\adb.exe`이다.
+설치 루트는 `%LOCALAPPDATA%\ESDE-Sync`이다. `State\sync.log`, `State\status.json`을 사용하며 로그는 `FileShare.ReadWrite`를 유지한다. ADB는 `platform-tools\adb.exe`이고 실행 디렉터리는 App 밖으로 고정한다. GUI 종료 시 kill-server 결과와 서버 종료를 확인한다.
 
-Windows PowerShell 5.1 호환성을 유지하고 PowerShell 파일은 UTF-8 BOM을 유지한다. GUI 읽기와 작업자 쓰기가 동시에 가능하도록 로그 접근에 `FileShare.ReadWrite`를 유지한다.
+## 선택 범위와 Android 안전 검사
 
-## 동기화 및 삭제 안전 규칙
+원본 `roms`의 첫 수준 폴더가 선택 시스템이다. 선택되지 않은 시스템은 수정하지 않는다. ROM은 strict mirror를 유지하되 `_TEST`/`_UNREGISTERED` 구성요소와 하위는 대소문자와 무관하게 비교·전송·삭제에서 제외한다. 원격 목록 실패와 빈 목록을 구분하고 삭제 전에 허용 루트 및 선택 시스템 경계를 검증한다. 불명확하면 중단한다. 실제 링크와 읽을 수 없는 Dropbox placeholder도 안전하게 차단한다.
 
-- `Dropbox\ES-DE Sync\roms`의 첫 번째 수준 폴더에서 선택된 시스템을 감지한다.
-- 선택된 시스템의 `roms`, `gamelists`, `downloaded_media`만 동기화한다. 선택되지 않은 시스템은 절대 삭제하거나 수정하지 않는다.
-- 삭제 로직을 수정하기 전에 원격 경로가 선택된 시스템 범위 안에 있는지 반드시 검증한다. 안전하게 판단할 수 없으면 삭제하지 않고 중단한다.
-- `_UNREGISTERED`, `_TEST`는 Android 로컬 전용 예약 폴더이다. 폴더와 모든 하위 항목을 일반 동기화에서 항상 제외하며 삭제, 덮어쓰기, Dropbox 비교 및 미러링을 금지한다.
+power·keyguard, activity activities/top, window windows/displays/policy, input, HOME 증거를 수집한다. Awake·잠금 해제와 activity/window/input 합의가 안정적으로 두 번 확인된 SAFE만 통과한다. HOME 설정이나 activity 하나만으로 허용하지 않는다. 게임·제3 앱, 수면, SystemUI, 누락·모순은 차단하고 게임을 강제 종료하지 않는다. 검사 후 ES-DE 종료 → 처리 → 재실행 순서이며, 이번 worker가 종료했다면 오류에도 복구 재실행을 시도한다. 패키지/activity는 `org.es_de.frontend` / `org.es_de.frontend/.MainActivityHomeApp`이다.
 
-## Android 실행 상태 검사
+## Gamelist metadata 정책
 
-- 동기화 전에 foreground 앱을 확인한다. 게임, 에뮬레이터 또는 다른 앱이 실행 중이면 동기화를 차단하고 해당 앱을 강제 종료하지 않는다.
-- foreground 감지 실패 또는 불확실한 결과는 안전을 위해 동기화를 차단한다.
-- 검사 통과 후 **ES-DE 종료 → 동기화 → ES-DE 재실행** 순서를 지킨다.
-- ES-DE 패키지는 `org.es_de.frontend`, activity는 `org.es_de.frontend/.MainActivityHomeApp`이다.
-- GUI 종료 시 `adb kill-server`를 실행한다.
-- Pocket Air Mini에서는 `dumpsys activity`만으로 foreground를 신뢰하지 않는다. `dumpsys activity activities`, `dumpsys activity top`, `dumpsys window displays`, `dumpsys window windows`, `dumpsys input`을 함께 조사하고 기기별 진단 로그를 남긴다. HOME 패키지가 ES-DE라는 이유만으로 동기화를 허용하지 않는다.
+ROM 존재 여부를 XML 엔트리로 판단하거나 새 game을 자동 생성하지 않는다. 일반 metadata는 Dropbox BASE가 기준이며 Android의 기존 local-only 경로 노드만 병합한다. 예약 이름은 경로의 어느 구성요소에도 적용하며 정규화 key는 대소문자를 구분한다. 로컬 충돌은 Android 우선, 전체 game 노드와 알 수 없는 필드를 보존한다. XML parser와 메모리 wrapper로 `alternativeEmulator`/`gameList` sibling 구조 및 top-level 순서를 유지한다. traversal·잘못된 XML은 차단한다.
 
-## 예정 기능: 기존 ROM 채택 및 gamelist 보존
+Dropbox XML 사전 검증 후 ES-DE 종료 상태에서 Android XML을 pull한다. 모든 선택 시스템의 병합 준비·검증이 완료되어야 mutation을 시작한다. Android temp push → 재-pull → XML/SHA 검증 → 기존 파일 동시 변경 확인 → 같은 디렉터리 mv로 교체한다. 원본 부재도 local-only가 있으면 보존하며, 없으면 pull/parse 이후 정확한 gamelist.xml만 제거한다. unknown 파일은 보존한다.
 
-- 신규 기기 또는 시스템 최초 채택 시 일반 미러링 전에 기존 Android ROM과 Dropbox ROM을 SHA-256으로 비교한다.
-- 해시가 일치하면 동일 ROM으로 간주하고 Dropbox가 관리하는 정상 복사본만 유지한다. 일치하는 Dropbox ROM이 없으면 기존 Android ROM을 `_UNREGISTERED`로 이동한다.
-- 예약 폴더 내부는 검사하거나 이동하지 않는다. 기기별·시스템별 채택 상태를 저장하여 반복 실행에도 안전하게 동작하고 매 동기화마다 파괴적 이관을 반복하지 않는다.
-- 정상 게임은 Dropbox `gamelist.xml`을 기준으로 한다. Android의 `<path>`가 `./_UNREGISTERED/` 또는 `./_TEST/`로 시작하는 `<game>` 항목은 향후 병합하여 보존한다.
-- gamelist 병합에는 정규식 대신 XML 파싱을 사용하고 중복 `<path>`를 만들지 않는다. 이후 Dropbox 업데이트에도 로컬 항목을 유지한다.
+## Media ownership과 복구
 
-## 변경 검증
+media는 ROM mirror와 별도 처리한다. `State\media-ownership\<source-device identity SHA>.json`에 원본 정규화 경로·identity, ADB serial, schema, 경로·배포 SHA·크기·시각을 저장한다. 다른 원본/기기의 manifest를 재사용하지 않는다. 손상·중복·잘못된 경로는 자동 초기화하지 않고 중단한다.
 
-변경 후 선택 범위 제한, 예약 폴더 보존, foreground 차단, ES-DE 재실행, 동시 로그 접근을 확인한다. foreground 변경은 RG Cube와 Pocket Air Mini의 진단 결과를 비교한다. 테스트 결과와 미검증 사항은 한국어로 보고한다.
+- 최초 도입 시 기존 Android media는 모두 unmanaged이다. 동일 경로·동일 SHA도 자동 채택하지 않는다.
+- Android-only unmanaged는 보존한다. 동일 경로의 다른 SHA는 변경 전에 전체 작업을 차단한다.
+- 신규 파일은 SHA 검증 전송 성공 후만 managed로 기록한다.
+- managed 현재 SHA가 마지막 deployed SHA와 같을 때만 원본 변경을 갱신하거나 원본 삭제에 따라 단일 파일을 삭제한다. Android 수정본은 덮어쓰기·삭제하지 않고 충돌로 차단한다.
+- 소유권 판단은 timestamp가 아닌 SHA-256이다. native/toybox sha256sum과 PC pull fallback을 사용한다. unknown hash는 destructive mutation 근거가 아니다.
+
+전체 media 계획을 검증하고 기존 managed 변경·삭제 전에 PC 백업을 확보한다. temp 전송·SHA·교체 검증 후 전체 성공 시 manifest를 atomic 저장한다. `State\media-transactions` journal로 작업을 기록하며 실패는 media 변경을 역순 rollback한다. **이미 처리한 ROM/gamelist까지 rollback하지는 않는다.** 미완료·손상 journal 또는 rollback 실패는 후속 작업을 차단하고 자료를 보존한다. 자동 crash recovery는 없으며 정상 종료·성공한 rollback의 임시 bytes만 정리하고 journal은 유지한다.
+
+## 업데이트·검증·배포
+
+App 교체와 rollback은 State/config.json/platform-tools를 보존한다. GUI/operation mutex, visible startup confirmation, 원래 오류와 rollback 오류 분리를 유지한다. `Get-PackageFiles`의 기존 App 8개 계약을 지켜 v1.4.8 설치 updater가 이해하지 못하는 새 runtime 파일을 추가하지 않는다. ZIP/hash/digest/manifest 검증과 **tag v1.4.8의 실제 validator** 호환 시험을 유지한다.
+
+`powershell.exe -NoProfile -File .\tests\media-ownership-static.ps1`처럼 테스트를 실행한다. foreground·gamelist·media 및 기존 updater/안전 테스트 전체, PowerShell 5.1 구문, BOM, `git diff --check`를 확인한다. 패키지는 `scripts/package-release.ps1 -Version 1.4.9`로 생성·재검증하고 reports/dist/State/로그/개인 설정을 포함하지 않는다.
+
+실기기 시험은 승인된 격리 범위와 백업·전후 SHA를 사용한다. 실제 사용자 라이브러리에 파괴적 시험을 하지 않으며 예상 밖 결과에는 중단하고 증거를 보존한다. Phase A/B의 Retroid 검증은 통과했지만 다른 vendor 검증과 실제 앱 내 v1.4.8→v1.4.9 업데이트는 별도 확인 사항이다. 승인 없이 commit/push/main 병합/tag/Release/설치를 수행하지 않는다.
