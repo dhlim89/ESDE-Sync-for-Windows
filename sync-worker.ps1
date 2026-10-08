@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot 'update-common.ps1')
 $AppVersion = Get-AppVersion (Join-Path $PSScriptRoot 'version.json')
 . (Join-Path $PSScriptRoot 'update-transaction.ps1')
+
 $OperationMutex = $null
 $PreviousProcessDirectory=[Environment]::CurrentDirectory
 try {
@@ -686,6 +687,291 @@ function Mirror-SystemFolder([string]$LocalSystemPath, [string]$RemoteSystemPath
     }
 }
 
+# 독립 metadata 병합 기반. ADB/ROM 탐색/원본 덮어쓰기 없이 사용한다.
+function Get-EsdeGamePathInfo([string]$Path) {
+    $invalid=[pscustomobject]@{Class='Invalid';Key=''}
+    if([string]::IsNullOrEmpty($Path) -or $Path -match '[\x00-\x1f\x7f]'){return $invalid}
+    $relative=$Path.Replace('\','/')
+    if($relative.StartsWith('/') -or $relative.Contains(':')){return $invalid}
+    if($relative.StartsWith('./')){$relative=$relative.Substring(2)}
+    $parts=$relative.Split('/')
+    if(@($parts|Where-Object {$_ -in @('','.', '..')}).Count){return $invalid}
+    $class='Managed'
+    foreach($part in $parts){
+        # worker Is-ExcludedRelativePath와 동일하게 모든 구성요소를 대소문자 무시 비교한다.
+        if($part -ieq '_TEST'){$class='LocalTest';break}
+        if($part -ieq '_UNREGISTERED'){$class='LocalUnregistered';break}
+    }
+    return [pscustomobject]@{Class=$class;Key=('./'+($parts-join'/'))}
+}
+
+function Get-EsdeGamePathClass([string]$Path) { return (Get-EsdeGamePathInfo $Path).Class }
+
+function ConvertFrom-EsdeGamelistBytes([byte[]]$Bytes,[string]$Source='memory') {
+    if($Bytes.Length -gt 33554432){throw 'gamelist 크기 제한 초과'}
+    $offset=0;$bom=$false
+    $encoding=New-Object Text.UTF8Encoding($false,$true)
+    if($Bytes.Length-ge3 -and $Bytes[0]-eq239 -and $Bytes[1]-eq187 -and $Bytes[2]-eq191){$offset=3;$bom=$true}
+    elseif($Bytes.Length-ge2 -and $Bytes[0]-eq255 -and $Bytes[1]-eq254){$encoding=New-Object Text.UnicodeEncoding($false,$false,$true);$offset=2;$bom=$true}
+    elseif($Bytes.Length-ge2 -and $Bytes[0]-eq254 -and $Bytes[1]-eq255){$encoding=New-Object Text.UnicodeEncoding($true,$false,$true);$offset=2;$bom=$true}
+    $text=$encoding.GetString($Bytes,$offset,$Bytes.Length-$offset)
+    $declaration=''
+    # XML declaration만 분리한다. game 블록은 문자열/정규식으로 편집하지 않는다.
+    $match=[regex]::Match($text,'\A<\?xml\s+[^?]*\?>')
+    if($match.Success){$declaration=$match.Value;$text=$text.Substring($match.Length)}
+    $settings=New-Object Xml.XmlReaderSettings
+    $settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver=$null
+    $settings.MaxCharactersInDocument=33554464
+    $document=New-Object Xml.XmlDocument
+    $document.PreserveWhitespace=$true;$document.XmlResolver=$null
+    $stringReader=New-Object IO.StringReader ('<esdeWrapper>'+$text+'</esdeWrapper>')
+    $reader=$null
+    try{
+        # declaration 자체도 XML parser로 검증한다.
+        if($declaration){
+            $probe=New-Object Xml.XmlDocument;$probe.XmlResolver=$null
+            $probe.LoadXml($declaration+'<declarationCheck/>')
+            $declEncoding=$probe.FirstChild.Encoding
+            if($declEncoding -and $declEncoding -notmatch '^(utf-8|utf-16|utf-16le|utf-16be)$'){throw '지원하지 않는 XML encoding'}
+            if($declEncoding -match '^utf-8$' -and $encoding.CodePage-ne65001){throw 'XML encoding/BOM 불일치'}
+            if($declEncoding -match '^utf-16' -and $encoding.CodePage-notin@(1200,1201)){throw 'XML encoding/BOM 불일치'}
+        }
+        $reader=[Xml.XmlReader]::Create($stringReader,$settings);$document.Load($reader)
+    }catch{throw ('gamelist XML 읽기 실패 ['+$Source+']: '+$_.Exception.Message)}
+    finally{if($reader){$reader.Dispose()};$stringReader.Dispose()}
+    $lists=@($document.DocumentElement.SelectNodes('gameList'))
+    if($lists.Count-gt1){throw ('여러 gameList 요소: '+$Source)}
+    $newline=if($text.Contains("`r`n")){"`r`n"}else{"`n"}
+    return [pscustomobject]@{Document=$document;Bytes=$Bytes;Declaration=$declaration;Encoding=$encoding;Bom=$bom;Newline=$newline;Source=$Source}
+}
+
+function Read-EsdeGamelist([string]$Path) {
+    if([string]::IsNullOrEmpty($Path)){return $null}
+    if(-not[IO.File]::Exists($Path)){throw ('명시한 gamelist 파일이 없거나 읽을 수 없음: '+$Path)}
+    if((New-Object IO.FileInfo $Path).Length-gt33554432){throw 'gamelist 크기 제한 초과'}
+    return ConvertFrom-EsdeGamelistBytes ([IO.File]::ReadAllBytes($Path)) ([IO.Path]::GetFullPath($Path))
+}
+
+function Get-EsdeGameEntries($Gamelist,[scriptblock]$Warning) {
+    if($null-eq$Gamelist){return}
+    foreach($node in $Gamelist.Document.DocumentElement.SelectNodes('gameList/game')){
+        $paths=@($node.SelectNodes('path'))
+        if($paths.Count-ne1 -or @($paths[0].SelectNodes('*')).Count){
+            if($Warning){& $Warning ('Invalid game path 구조: '+$Gamelist.Source)|Out-Null}
+            throw 'game에 단일 텍스트 path가 필요합니다.'
+        }
+        $info=Get-EsdeGamePathInfo $paths[0].InnerText
+        if($info.Class-eq'Invalid'){
+            if($Warning){& $Warning ('Invalid game path: '+$paths[0].InnerText)|Out-Null}
+            throw ('안전하지 않은 game path: '+$paths[0].InnerText)
+        }
+        [pscustomobject]@{Node=$node;Key=$info.Key;Class=$info.Class}
+    }
+}
+
+function Get-LocalOnlyGameEntries($Gamelist,[scriptblock]$Warning) {
+    Get-EsdeGameEntries $Gamelist $Warning|Where-Object {$_.Class -in @('LocalTest','LocalUnregistered')}
+}
+
+function ConvertTo-EsdeGamelistBytes($Gamelist) {
+    $text=$Gamelist.Declaration+$Gamelist.Document.DocumentElement.InnerXml
+    $text=$text.Replace("`r`n","`n").Replace("`n",$Gamelist.Newline)
+    $bytes=$Gamelist.Encoding.GetBytes($text)
+    if($Gamelist.Bom){
+        $prefix=if($Gamelist.Encoding.CodePage-eq65001){[byte[]]@(239,187,191)}elseif($Gamelist.Encoding.CodePage-eq1200){[byte[]]@(255,254)}else{[byte[]]@(254,255)}
+        $bytes=[byte[]]($prefix+$bytes)
+    }
+    # 출력 경로에 쓰기 전에 실제 저장할 바이트를 다시 파싱한다.
+    [void](ConvertFrom-EsdeGamelistBytes $bytes 'validated output')
+    return ,$bytes
+}
+
+function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning) {
+    $warnings=New-Object 'Collections.Generic.List[string]'
+    $emit={param($message)$warnings.Add($message);if($Warning){& $Warning $message|Out-Null}}.GetNewClosure()
+    $baseEntries=@(Get-EsdeGameEntries $Base $emit)
+    $localEntries=@(Get-LocalOnlyGameEntries $Local $emit)
+    if($null-eq$Base -and $localEntries.Count-eq0){return $null}
+    $template=if($null-ne$Base){$Base}else{$Local}
+    $result=ConvertFrom-EsdeGamelistBytes $template.Bytes 'merge copy'
+    $result.Document=$template.Document.CloneNode($true)
+    $root=$result.Document.DocumentElement
+    $list=$root.SelectSingleNode('gameList')
+    if(-not$list){$list=$result.Document.CreateElement('gameList');[void]$root.AppendChild($list)}
+    $changed=($null-eq$Base)
+    # Android 파일만 있을 때는 normal metadata를 승격시키지 않는다.
+    if($null-eq$Base){foreach($node in @($list.ChildNodes)){[void]$list.RemoveChild($node)}}
+    $keys=New-Object 'Collections.Generic.Dictionary[string,System.Xml.XmlElement]' ([StringComparer]::Ordinal)
+    foreach($node in @($list.SelectNodes('game'))){
+        $info=Get-EsdeGamePathInfo $node.SelectSingleNode('path').InnerText
+        if($info.Class-ne'Managed'){& $emit ('Dropbox local-only 경로 발견: '+$info.Key)}
+        if($keys.ContainsKey($info.Key)){
+            [void]$list.RemoveChild($node);$changed=$true;& $emit ('Dropbox 중복 path: '+$info.Key)
+        }else{$keys.Add($info.Key,$node)}
+    }
+    $localKeys=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($entry in $localEntries){
+        if(-not$localKeys.Add($entry.Key)){& $emit ('Android local-only 중복 path, 첫 항목 보존: '+$entry.Key);continue}
+        $imported=$result.Document.ImportNode($entry.Node,$true)
+        if($keys.ContainsKey($entry.Key)){
+            & $emit ('local-only 충돌: Android 우선 '+$entry.Key)
+            [void]$list.ReplaceChild($imported,$keys[$entry.Key]);$keys[$entry.Key]=$imported
+        }else{
+            [void]$list.AppendChild($result.Document.CreateWhitespace($template.Newline))
+            [void]$list.AppendChild($imported);$keys.Add($entry.Key,$imported)
+        }
+        $changed=$true
+    }
+    $result.Bytes=if($changed){ConvertTo-EsdeGamelistBytes $result}else{$template.Bytes}
+    [void](ConvertFrom-EsdeGamelistBytes $result.Bytes 'merge verification')
+    $result|Add-Member -NotePropertyName Warnings -NotePropertyValue @($warnings.ToArray())
+    $result|Add-Member -NotePropertyName InputPaths -NotePropertyValue @($Base.Source,$Local.Source|Where-Object {$_})
+    return $result
+}
+
+function Write-EsdeGamelist($Gamelist,[string]$Path) {
+    if($null-eq$Gamelist){return $false}
+    if([string]::IsNullOrWhiteSpace($Path)){throw '출력 경로가 필요합니다.'}
+    $destination=[IO.Path]::GetFullPath($Path)
+    if($Gamelist.InputPaths -icontains $destination -or [IO.File]::Exists($destination)){throw '원본/기존 파일 덮어쓰기 금지'}
+    # 새 PC staging 파일만 생성한다. 검증된 bytes를 임시 파일에 쓴 후 이동한다.
+    $validated=ConvertFrom-EsdeGamelistBytes $Gamelist.Bytes 'write verification'
+    [void]@(Get-EsdeGameEntries $validated)
+    $temporary=$destination+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try{
+        $stream=New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Write($Gamelist.Bytes,0,$Gamelist.Bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        [void](Read-EsdeGamelist $temporary)
+        [IO.File]::Move($temporary,$destination)
+    }finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
+    return $true
+}
+
+function Get-GamelistSource([string]$LocalSystemPath) {
+    $file=Join-Path $LocalSystemPath 'gamelist.xml'
+    if (-not (Test-Path -LiteralPath $file)) { return $null }
+    try {
+        Assert-LocalSourcePath $file $SourceRoot
+        $source=Read-EsdeGamelist $file
+        [void]@(Get-EsdeGameEntries $source)
+        return $source
+    } catch { Write-Log 'GAMELIST BLOCK: malformed/unreadable Dropbox XML'; throw }
+}
+
+function Get-RemoteGamelistState([string]$RemoteFile) {
+    Assert-RemotePath $RemoteFile
+    $q=Quote-Sh $RemoteFile
+    $dir=Quote-Sh ($RemoteFile.Substring(0,$RemoteFile.LastIndexOf('/')))
+    # test false를 ADB 실패와 구분한다. 부모 조회 실패/비정상 타입/링크는 absent로 숨기지 않는다.
+    $command=@'
+if [ -L {0} ]; then exit 1
+elif [ -d {0} ]; then cd {0} || exit 1
+elif [ -e {0} ]; then exit 1
+else
+  ok=0
+  for parent in /storage/emulated/0/ES-DE/gamelists /storage/emulated/0/ES-DE /storage/emulated/0; do
+    if [ -L "$parent" ]; then exit 1
+    elif [ -d "$parent" ]; then cd "$parent" || exit 1; ok=1; break
+    elif [ -e "$parent" ]; then exit 1; fi
+  done
+  [ "$ok" = 1 ] || exit 1
+fi
+if [ -L {1} ]; then exit 1
+elif [ -f {1} ]; then printf PRESENT
+elif [ -e {1} ]; then exit 1
+else printf ABSENT; fi
+'@
+    $r=Invoke-Adb -s $Serial shell ($command -f $dir,$q)
+    if ($r.Code-ne0 -or $r.StdErr -or $r.StdOut -cnotin @('PRESENT','ABSENT')) { throw 'Android gamelist 존재 조회 실패' }
+    return ($r.StdOut-ceq'PRESENT')
+}
+
+function Prepare-GamelistSystem($Job,[string]$Session) {
+    $remote=$Job.RemotePath+'/gamelist.xml'
+    Assert-RemotePath $remote
+    $folder=Join-Path $Session ([guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $folder)
+    Write-Log ('GAMELIST '+$Job.System+': DROPBOX: '+$(if($Job.GamelistSource){'present'}else{'absent'}))
+    $present=Get-RemoteGamelistState $remote
+    Write-Log ('GAMELIST '+$Job.System+': ANDROID: '+$(if($present){'present'}else{'absent'}))
+    $local=$null;$pulled=$null
+    if($present){
+        $pulled=Join-Path $folder 'android.xml'
+        $r=Invoke-Adb -s $Serial pull $remote $pulled
+        if($r.Code-ne0 -or -not(Test-Path -LiteralPath $pulled -PathType Leaf)){throw 'Android gamelist pull 실패'}
+        try{$local=Read-EsdeGamelist $pulled}catch{Write-Log 'GAMELIST BLOCK: malformed Android XML';throw}
+    }
+    $entries=@(Get-LocalOnlyGameEntries $local {param($message)Write-Log ('GAMELIST WARNING: '+$message)})
+    Write-Log ('GAMELIST '+$Job.System+': LOCAL-ONLY: '+$entries.Count+' _TEST: '+@($entries|Where-Object Class -eq LocalTest).Count+' _UNREGISTERED: '+@($entries|Where-Object Class -eq LocalUnregistered).Count)
+    $merged=Merge-EsdeGamelist $Job.GamelistSource $local {param($message)Write-Log ('GAMELIST WARNING: '+$message)}
+    $output=$null
+    if($merged){
+        $output=Join-Path $folder 'merged.xml'
+        [void](Write-EsdeGamelist $merged $output)
+        [void]@(Get-EsdeGameEntries (Read-EsdeGamelist $output))
+        Write-Log ('GAMELIST '+$Job.System+': MERGE: created VALIDATION: pass')
+    }
+    return [pscustomobject]@{System=$Job.System;RemotePath=$Job.RemotePath;RemoteFile=$remote;Present=$present;Output=$output;Pulled=$pulled;Validated=$true;LocalOnlyCount=$entries.Count;SourcePresent=[bool]$Job.GamelistSource}
+}
+
+function Assert-GamelistSnapshot($Plan) {
+    $present=Get-RemoteGamelistState $Plan.RemoteFile
+    if($present-ne$Plan.Present){throw 'Android gamelist 상태가 준비 이후 변경되었습니다.'}
+    if($present){
+        $current=Join-Path (Split-Path -Parent $Plan.Pulled) 'current-before-commit.xml'
+        $r=Invoke-Adb -s $Serial pull $Plan.RemoteFile $current
+        if($r.Code-ne0 -or -not(Test-Path -LiteralPath $current -PathType Leaf)){throw 'Android gamelist 교체 전 재확인 실패'}
+        if((Get-FileHash -LiteralPath $current -Algorithm SHA256).Hash-cne(Get-FileHash -LiteralPath $Plan.Pulled -Algorithm SHA256).Hash){throw 'Android gamelist 내용이 준비 이후 변경되었습니다.'}
+    }
+}
+
+function Sync-GamelistSystem($Plan) {
+    # Plan이 호출자에 의해 바뀌어도 선택된 gamelist.xml 외 파일은 취급하지 않는다.
+    Assert-RemotePath $Plan.RemoteFile
+    if(-not$Plan.Validated){throw '검증되지 않은 gamelist plan'}
+    if($Plan.RemotePath-cne('/storage/emulated/0/ES-DE/gamelists/'+$Plan.System) -or $Plan.RemoteFile-cne($Plan.RemotePath+'/gamelist.xml')){throw 'gamelist 처리 범위 오류'}
+    if(-not$Plan.Output){
+        if($Plan.Present){
+            if($Plan.SourcePresent -or $Plan.LocalOnlyCount-ne0 -or -not$Plan.Pulled){throw 'gamelist 삭제 조건 불일치'}
+            if(@(Get-LocalOnlyGameEntries (Read-EsdeGamelist $Plan.Pulled)).Count){throw 'local-only metadata 삭제 금지'}
+            Assert-GamelistSnapshot $Plan
+            Write-Log ('GAMELIST '+$Plan.System+': ACTION: remove gamelist.xml (pulled/parsed, local-only=0)')
+            Remove-RemoteFile $Plan.RemoteFile
+            # 기존 경로 검증은 시스템 루트 rmdir도 막는다. 폴더/unknown 파일은 그대로 둔다.
+        }else{Write-Log ('GAMELIST '+$Plan.System+': ACTION: no-op')}
+        return
+    }
+    [void]@(Get-EsdeGameEntries (Read-EsdeGamelist $Plan.Output))
+    Ensure-RemoteDir $Plan.RemotePath
+    $temporary=$Plan.RemoteFile+'.esde-sync-new-'+[guid]::NewGuid().ToString('N')
+    if(Get-RemoteGamelistState $temporary){throw 'Android staging 파일 충돌'}
+    $attempted=$false
+    try{
+        $attempted=$true
+        $r=Invoke-Adb -s $Serial push $Plan.Output $temporary
+        if($r.Code-ne0){throw 'gamelist temp push 실패'}
+        Write-Log ('GAMELIST '+$Plan.System+': PUSH TEMP: pass')
+        $r=Invoke-Adb -s $Serial shell ('stat -c %s '+(Quote-Sh $temporary))
+        $size=(Get-Item -LiteralPath $Plan.Output).Length
+        if($r.Code-ne0 -or $r.StdErr -or $r.StdOut.Trim()-cne[string]$size){throw 'Android gamelist staging 크기 검증 실패'}
+        $readBack=Join-Path (Split-Path -Parent $Plan.Output) 'pushed-back.xml'
+        $r=Invoke-Adb -s $Serial pull $temporary $readBack
+        if($r.Code-ne0 -or -not(Test-Path -LiteralPath $readBack -PathType Leaf)){throw 'Android staging 재확인 pull 실패'}
+        [void]@(Get-EsdeGameEntries (Read-EsdeGamelist $readBack))
+        if((Get-FileHash -LiteralPath $readBack -Algorithm SHA256).Hash-cne(Get-FileHash -LiteralPath $Plan.Output -Algorithm SHA256).Hash){throw 'Android staging 전송 해시 불일치'}
+        Write-Log ('GAMELIST '+$Plan.System+': REMOTE VALIDATION: pass')
+        # 같은 디렉터리의 rename. 최종 파일을 먼저 삭제하거나 직접 push하지 않는다.
+        Assert-GamelistSnapshot $Plan
+        $r=Invoke-Adb -s $Serial shell ('mv -f '+(Quote-Sh $temporary)+' '+(Quote-Sh $Plan.RemoteFile))
+        if($r.Code-ne0 -or $r.StdErr){throw 'gamelist final mv 실패 (완료 여부를 로그로 확인해야 합니다.)'}
+        $attempted=$false
+        Write-Log ('GAMELIST '+$Plan.System+': REPLACE: pass')
+    }finally{
+        if($attempted){try{Remove-RemoteFile $temporary;Write-Log 'GAMELIST TEMP CLEANUP: pass'}catch{Write-Log ('GAMELIST TEMP CLEANUP FAILED: '+$_.Exception.Message)}}
+    }
+}
+
 function Write-EsdeLifecycleLog([string]$Message) {
     try { Write-Log $Message } catch {}
 }
@@ -769,10 +1055,17 @@ try {
     foreach ($job in $jobs) {
         Assert-LocalSourcePath (Split-Path -Parent $job.LocalPath) $SourceRoot
         if (Test-Path -LiteralPath $job.LocalPath) { [void]@(Get-ManagedLocalItems $job.LocalPath $SourceRoot) }
+        if($job.Bucket.Local-eq'gamelists'){$job|Add-Member -NotePropertyName GamelistSource -NotePropertyValue (Get-GamelistSource $job.LocalPath)}
     }
 
     $esdeLifecycleStarted = $true
     Invoke-EsdeSync {
+        $gamelistSession=Join-Path ([IO.Path]::GetTempPath()) ('ESDE-gamelist-'+[guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $gamelistSession)
+        try {
+        # ES-DE 종료 후 모든 Android XML을 pull/병합 검증해야 어떤 bucket의 변경도 시작한다.
+        $gamelistPlans=@{}
+        foreach($job in $jobs){if($job.Bucket.Local-eq'gamelists'){$gamelistPlans[$job.System]=Prepare-GamelistSystem $job $gamelistSession}}
         $i = 0
         foreach ($job in $jobs) {
             $i++
@@ -780,7 +1073,10 @@ try {
             Write-Status "running" "$label 처리 중..." $i $jobs.Count
             Write-Log "PROCESS $label"
     
-            if (Test-Path -LiteralPath $job.LocalPath) {
+            if($job.Bucket.Local-eq'gamelists'){
+                Sync-GamelistSystem $gamelistPlans[$job.System]
+            }
+            elseif (Test-Path -LiteralPath $job.LocalPath) {
                 Mirror-SystemFolder $job.LocalPath $job.RemotePath $label
             }
             else {
@@ -798,7 +1094,10 @@ try {
                 }
             }
         }
-    
+        } finally {
+            try { [IO.Directory]::Delete($gamelistSession,$true); Write-Log 'GAMELIST PC STAGING CLEANUP: pass' }
+            catch { Write-Log ('GAMELIST PC STAGING CLEANUP FAILED: '+$_.Exception.Message) }
+        }
     }
     Write-Status "done" "동기화 완료" $jobs.Count $jobs.Count
     Write-Log "===== SELECTED-SYSTEM MIRROR COMPLETE ====="

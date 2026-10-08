@@ -1,7 +1,11 @@
 ﻿# fixture만 사용한다. 실제 Android/ROM/Dropbox에는 접근하지 않는다.
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
-. (Join-Path $repo 'gamelist-common.ps1')
+# runtime 함수의 단일 원본인 worker AST 정의만 로드한다. 본문은 실행하지 않는다.
+$runtimeAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'sync-worker.ps1'),[ref]$null,[ref]$null)
+foreach($runtimeFunction in $runtimeAst.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$false)){
+    . ([scriptblock]::Create($runtimeFunction.Extent.Text))
+}
 $sandbox=Join-Path ([IO.Path]::GetTempPath()) ('esde-gamelist-test-'+[guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $sandbox)
 $script:Passed=0

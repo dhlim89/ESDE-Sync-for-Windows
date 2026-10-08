@@ -216,7 +216,7 @@ ES-DE 이외 HOME은 실제 HOME component까지 합의해야 합니다.
 
 v1.4.9 stage 2: gamelist metadata 병합 기반
 ------------------------------------------
-gamelist-common.ps1은 독립 모듈이며 현재 sync-worker에는 연결되지 않았습니다.
+stage 2 당시 gamelist-common.ps1은 독립 모듈이었습니다. 현재는 아래 호환 보정대로 worker 내부에 통합했습니다.
 ROM 파일과 metadata를 분리합니다. 엔트리 없는 ROM에 새 game을 만들지 않습니다.
 Dropbox 일반 metadata를 유지하고 Android의 기존 _TEST/_UNREGISTERED game
 전체 노드만 병합합니다. 예약 폴더는 경로의 어느 구성요소에 있어도 로컬 전용입니다.
@@ -230,3 +230,23 @@ Dropbox가 없으면 기존 Android 로컬 엔트리가 있을 때만 파일을 
 출력은 재파싱한 새 PC staging 파일만 허용하며 원본/기존 파일 덮어쓰기를 거부합니다.
 ROM 채택/이동, 미디어 파일 보호, 실제 Android pull/push 연결은 아직 구현하지 않았습니다.
 검증: powershell.exe -NoProfile -File .\tests\gamelist-merge-static.ps1
+
+v1.4.9 stage 3: gamelist worker 연결
+----------------------------------
+gamelist bucket은 이제 전용 처리이며 앞 절의 미연결 설명은 stage 2 당시 기준입니다.
+Dropbox XML은 전체 원본 검증에서 먼저 파싱합니다. ES-DE 종료 후 모든 선택
+시스템의 Android XML을 pull/병합/PC staging 재검증해야 원격 변경을 시작합니다.
+병합 결과는 Android 동일 폴더의 고유 임시 파일에 push하고 size를 확인한 뒤
+임시 파일을 다시 pull하여 XML과 SHA-256을 확인한 뒤 mv로 gamelist.xml을 교체합니다.
+기존 최종 파일을 먼저 삭제하거나 직접 push하지 않습니다.
+Dropbox 부재 시 local-only가 있으면 보존하고, 없으면 pull/parse 이후 정확한
+gamelist.xml만 삭제합니다. unknown 파일 및 시스템 폴더는 보존합니다.
+PC/Android 임시 파일은 정리를 시도하고 실패하면 로그를 남깁니다.
+mv 응답 중 연결이 끊기면 교체 완료 여부가 불명확할 수 있으므로 로그/파일 확인이 필요합니다.
+ROM/media/foreground/예약 폴더 동작은 변경하지 않았습니다. emulator 변환은 없습니다.
+배포 호환 보정으로 gamelist runtime은 sync-worker.ps1 내부에 통합했습니다.
+gamelist-common.ps1은 제거했으며 테스트도 worker 함수 정의만 로드합니다.
+패키지는 v1.4.8과 같은 App 파일 집합을 유지하고 updater 트랜잭션은 변경하지 않습니다.
+tag v1.4.8의 실제 validator로 v1.4.9 ZIP/manifest/asset/SHA 계약을 검증합니다.
+검증: powershell.exe -NoProfile -File .\tests\update-v148-compat-static.ps1
+모의 검증: powershell.exe -NoProfile -File .\tests\gamelist-worker-static.ps1
