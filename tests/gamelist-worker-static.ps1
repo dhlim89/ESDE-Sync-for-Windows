@@ -105,7 +105,7 @@ Check ($script:Calls.Count-eq3) '미선택 시스템 원격 조회 없음 (prefl
 $source=[IO.File]::ReadAllText((Join-Path $repo 'sync-worker.ps1'))
 Check ($source.IndexOf('GamelistSource -NotePropertyValue (Get-GamelistSource')-lt$source.LastIndexOf('Invoke-EsdeSync {')) '전체 source 단계에 Dropbox parse 연결'
 Check ($source.IndexOf('Prepare-GamelistSystem $job $gamelistSession')-lt$source.LastIndexOf('Sync-PreservedRomSystem $job')) '모든 Android 병합 준비가 ROM 변경보다 먼저'
-Check ($source.IndexOf('Prepare-UnregisteredAdoptionSystem $romJob')-lt$source.LastIndexOf('Invoke-UnregisteredAdoptionTransaction $combined')) '모든 adoption 준비가 mutation보다 먼저'
-Check ($source.IndexOf('Prepare-MediaPlan $mediaJobs')-lt$source.LastIndexOf('Invoke-UnregisteredAdoptionTransaction $combined')) 'media 검증도 adoption mutation보다 먼저'
+Check ($source.IndexOf('Prepare-UnregisteredAdoptionSystem $romJob')-lt$source.LastIndexOf('Invoke-AdoptionWithCapabilityGate $combined')) '모든 adoption 준비가 mutation보다 먼저'
+Check ($source.IndexOf('Prepare-MediaPlan $mediaJobs')-lt$source.LastIndexOf('Invoke-AdoptionWithCapabilityGate $combined')) 'media 검증도 adoption mutation보다 먼저'
 Check ($source.Contains('[IO.Directory]::Delete($gamelistSession,$true)')) 'PC staging finally cleanup 연결'
 Write-Output ('gamelist worker 검증 완료: '+$script:Passed+' 항목 / PowerShell '+$PSVersionTable.PSVersion)

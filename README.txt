@@ -321,3 +321,12 @@ RC 준비는 정식 Release 게시가 아니며 승인 없이 main/tag/Release�
 - 보상 전송도 실패하면 fatal 로그/journal과 PC 원본 복사본을 보존하고 수동 검토가 필요합니다. 자동 crash recovery/resume는 없습니다.
 - mock/fixture 시험만 수행했습니다. 실제 Android/Dropbox adoption, 설치 및 Stage 2 commit/push는 수행하지 않았습니다.
 - 자세한 transaction 경계/실기기 전제는 docs/v150-stage2-executor.md를 참조하십시오.
+[v1.5.0 Stage 3.1 개발 — 실제 재시험/abandon 미실행]
+- adoption plan별 Windows AccessCheck 기반 Dropbox capability 검사. 불가능/Unknown이면 journal 생성 전 차단.
+- 동일 SHA ROM reuse 및 XML unchanged에는 불필요한 쓰기 권한을 요구하지 않습니다.
+- worker는 capability 부족인 adoption만 건너뛰고 기존 Dropbox→Android 동기화를 계속합니다.
+- sibling staging/SHA/fingerprint/Move·Replace와 미완료 journal 차단은 유지합니다.
+- 읽기 전용 inspector와 명시적 승인/이유가 필요한 별도 abandon resolution을 추가했습니다.
+- 원본 journal은 수정/삭제하지 않으며 실제 실패 transaction은 이번에 abandon하지 않았습니다.
+- 지원되지 않는 ACL/상속/API, 누락 증거/unknown hash/손상 resolution은 fail closed입니다.
+- disk space/volume 검사와 abandon GUI는 미구현입니다. 자세한 범위는 docs/v150-stage31-capability-inspector.md를 참조하십시오.
