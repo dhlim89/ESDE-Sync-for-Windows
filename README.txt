@@ -250,3 +250,28 @@ gamelist-common.ps1은 제거했으며 테스트도 worker 함수 정의만 로�
 tag v1.4.8의 실제 validator로 v1.4.9 ZIP/manifest/asset/SHA 계약을 검증합니다.
 검증: powershell.exe -NoProfile -File .\tests\update-v148-compat-static.ps1
 모의 검증: powershell.exe -NoProfile -File .\tests\gamelist-worker-static.ps1
+
+v1.4.9 stage 5: media ownership 안전 정책
+---------------------------------------
+media는 ROM strict mirror와 분리했습니다. 기존 Android media는 전부 unmanaged이며
+동일 경로/동일 SHA여도 자동 채택하지 않습니다. unmanaged Android-only는 보존하고,
+같은 경로의 다른 SHA 및 managed Android 수정은 원격 변경 전에 충돌로 차단합니다.
+managed 파일만 마지막 deployed SHA와 현재 Android SHA가 같을 때 갱신/삭제합니다.
+원본 시스템 media 폴더가 없어도 전체 폴더 삭제는 하지 않습니다.
+manifest: State/media-ownership/<source-device identity SHA>.json
+schemaVersion/sourceRoot/sourceIdentity/deviceSerial/createdAt/updatedAt/entries를 기록하며
+entry는 system/relativePath/sourceSha256/deployedSha256/sourceSize/deployedAt/lastVerifiedAt입니다.
+기기/원본 identity, schema, 필수 필드, 중복 key, 경로가 잘못되면 초기화하지 않고 중단합니다.
+source SHA는 ES-DE 종료 전 준비하고, Android SHA/전체 media 계획은 종료 후 검증합니다.
+모든 계획이 검증되어야 ROM/gamelist/media 변경을 시작합니다. 이후 media 적용 실패는
+media만 rollback하며 앞서 완료된 ROM/gamelist까지 전체 rollback하는 기능은 아닙니다.
+SHA 확인은 sha256sum -> toybox sha256sum -> PC pull 순서로 수행합니다.
+기존 managed 변경/삭제 전 검증된 PC 백업을 확보하고, temp 전송/SHA/rename 후 확인합니다.
+전체 성공 때만 manifest를 atomic 저장합니다. 실패는 역순 rollback하며 원래 오류를 유지합니다.
+State/media-transactions에 durable journal과 백업을 기록합니다. 강제 중단/rollback 실패는
+다음 작업을 차단하고 백업을 남깁니다. 자동 crash recovery는 아직 없습니다.
+정상 종료 또는 성공한 rollback은 source/backup/hash 임시 파일을 정리하고 journal은 유지합니다.
+전체 source hash/staging 준비는 시간과 State 여유 공간이 필요합니다.
+ROM/gamelist/foreground/공통 삭제/updater 실행 로직 및 App 8개 패키지 계약은 유지합니다.
+실제 Android 적용은 아직 미검증입니다.
+모의 검증: powershell.exe -NoProfile -File .\tests\media-ownership-static.ps1

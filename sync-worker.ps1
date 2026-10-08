@@ -972,6 +972,313 @@ function Sync-GamelistSystem($Plan) {
     }
 }
 
+function Get-MediaRelativePath([string]$Path) {
+    $value=$Path.Replace('\','/')
+    if($value.StartsWith('./')){$value=$value.Substring(2)}
+    if(-not$value -or $value.StartsWith('/') -or $value.Contains(':') -or $value-match'[\x00-\x1f\x7f]' -or @($value.Split('/')|Where-Object {$_-in@('','.', '..')}).Count){throw 'invalid media relativePath'}
+    return $value
+}
+
+function Get-MediaRemotePath([string]$System,[string]$Relative) {
+    if((Get-MediaRelativePath $System)-cne$System -or $System.Contains('/')){throw 'invalid media system'}
+    $relative=Get-MediaRelativePath $Relative
+    if(Is-ExcludedRelativePath $relative){throw '예약 media 경로 접근 금지'}
+    $path='/storage/emulated/0/ES-DE/downloaded_media/'+$System+'/'+$relative
+    Assert-RemotePath $path
+    return $path
+}
+
+function Get-MediaTextHash([string]$Text) {
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+}
+
+function Assert-MediaDiskPath([string]$Path,[string]$StateRoot) {
+    $full=[IO.Path]::GetFullPath($Path);$root=[IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    if(-not$full.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'media State 범위 밖 경로'}
+    $cursor=$full
+    while($cursor -and $cursor.Length-ge$root.Length){
+        if(Test-Path -LiteralPath $cursor){if((Get-Item -LiteralPath $cursor -Force).Attributes-band[IO.FileAttributes]::ReparsePoint){throw 'media State reparse 경로 금지'}}
+        $cursor=Split-Path -Parent $cursor
+    }
+    return $full
+}
+
+function Assert-MediaManifest($Manifest,$Context) {
+    foreach($name in @('schemaVersion','sourceRoot','sourceIdentity','deviceSerial','createdAt','updatedAt','entries')){if($Manifest.PSObject.Properties.Name-cnotcontains$name){throw ('media manifest 필수 필드 누락: '+$name)}}
+    if($Manifest.schemaVersion-isnot[int] -or $Manifest.schemaVersion-ne1 -or $Manifest.sourceRoot-cne$Context.SourceRoot -or $Manifest.sourceIdentity-cne$Context.SourceIdentity -or $Manifest.deviceSerial-cne$Context.Serial){throw 'media manifest schema/identity 불일치'}
+    foreach($stamp in @($Manifest.createdAt,$Manifest.updatedAt)){$parsed=[DateTimeOffset]::MinValue;if(-not[DateTimeOffset]::TryParse([string]$stamp,[ref]$parsed)){throw 'media manifest 시각 오류'}}
+    if($Manifest.entries-isnot[Array]){throw 'media manifest entries 배열 필요'}
+    $keys=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($entry in $Manifest.entries){
+        foreach($name in @('system','relativePath','sourceSha256','deployedSha256','sourceSize','deployedAt','lastVerifiedAt')){if($entry.PSObject.Properties.Name-cnotcontains$name){throw ('media entry 필수 필드 누락: '+$name)}}
+        $relative=Get-MediaRelativePath $entry.relativePath
+        if($relative-cne$entry.relativePath -or (Is-ExcludedRelativePath $relative) -or (Get-MediaRelativePath $entry.system)-cne$entry.system -or $entry.system.Contains('/')){throw 'media manifest 경로 오류'}
+        if(-not$keys.Add($entry.system+'/'+$relative)){throw 'media manifest 중복 key'}
+        if($entry.sourceSha256-cnotmatch'^[a-f0-9]{64}$' -or $entry.deployedSha256-cnotmatch'^[a-f0-9]{64}$' -or $entry.sourceSize-isnot[ValueType] -or $entry.sourceSize-is[bool] -or [double]$entry.sourceSize-lt0 -or [double]$entry.sourceSize-ne[long]$entry.sourceSize){throw 'media manifest hash/size 오류'}
+        foreach($stamp in @($entry.deployedAt,$entry.lastVerifiedAt)){$parsed=[DateTimeOffset]::MinValue;if(-not[DateTimeOffset]::TryParse([string]$stamp,[ref]$parsed)){throw 'media entry 시각 오류'}}
+    }
+}
+
+function Write-MediaJson([string]$Path,$Value,[string]$StateRoot) {
+    [void](Assert-MediaDiskPath $Path $StateRoot)
+    $temporary=$Path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try{
+        $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes(($Value|ConvertTo-Json -Depth 12))
+        $stream=New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        [void]([IO.File]::ReadAllText($temporary)|ConvertFrom-Json)
+        if([IO.File]::Exists($Path)){[IO.File]::Replace($temporary,$Path,$Path+'.bak')}
+        else{[IO.File]::Move($temporary,$Path)}
+    }finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
+}
+
+function New-MediaContext([string]$StateRoot,[string]$Source,[string]$Device) {
+    if(-not$Device -or $Device-match'[\x00-\x1f\x7f]'){throw 'media device identity 필요'}
+    $source=[IO.Path]::GetFullPath($Source).TrimEnd('\').ToUpperInvariant()
+    $sourceId=Get-MediaTextHash $source;$id=Get-MediaTextHash ($sourceId+'|'+$Device)
+    $context=[pscustomobject]@{StateRoot=[IO.Path]::GetFullPath($StateRoot);SourceRoot=$source;SourceIdentity=$sourceId;Serial=$Device;ManifestPath=(Join-Path $StateRoot ('media-ownership/'+$id+'.json'));Transactions=(Join-Path $StateRoot ('media-transactions/'+$id));Session=$null;Manifest=$null;OriginalBytes=$null}
+    foreach($folder in @((Split-Path -Parent $context.ManifestPath),$context.Transactions)){[void](Assert-MediaDiskPath $folder $StateRoot);[void](New-Item -ItemType Directory -Path $folder -Force)}
+    foreach($folder in @(Get-ChildItem -LiteralPath $context.Transactions -Directory)){
+        $journalPath=Join-Path $folder.FullName 'journal.json';[void](Assert-MediaDiskPath $journalPath $StateRoot)
+        if(-not(Test-Path -LiteralPath $journalPath)){throw ('미완료 media 준비 세션: '+$folder.FullName)}
+        try{$journal=Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8|ConvertFrom-Json}catch{throw 'media journal 손상'}
+        if($journal.state-cnotin@('completed','rolled_back')){throw ('미완료 media transaction 복구 필요: '+$folder.FullName)}
+    }
+    if(Test-Path -LiteralPath $context.ManifestPath){
+        [void](Assert-MediaDiskPath $context.ManifestPath $StateRoot)
+        $context.OriginalBytes=[IO.File]::ReadAllBytes($context.ManifestPath)
+        try{$context.Manifest=[Text.Encoding]::UTF8.GetString($context.OriginalBytes).TrimStart([char]0xfeff)|ConvertFrom-Json}catch{throw 'media manifest JSON 손상'}
+    }else{
+        $now=(Get-Date).ToUniversalTime().ToString('o')
+        $context.Manifest=[pscustomobject]@{schemaVersion=1;sourceRoot=$source;sourceIdentity=$sourceId;deviceSerial=$Device;createdAt=$now;updatedAt=$now;entries=@()}
+    }
+    Assert-MediaManifest $context.Manifest $context
+    $context.Session=Join-Path $context.Transactions ([guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $context.Session)
+    if($context.OriginalBytes){[IO.File]::WriteAllBytes((Join-Path $context.Session 'original-manifest.json'),$context.OriginalBytes)}
+    Write-MediaJson (Join-Path $context.Session 'journal.json') ([pscustomobject]@{state='preparing';operations=@()}) $StateRoot
+    return $context
+}
+
+function Get-MediaSourceFiles($Jobs,$Context) {
+    $files=@()
+    foreach($job in $Jobs){
+        if(-not(Test-Path -LiteralPath $job.LocalPath)){continue}
+        foreach($item in @(Get-ManagedLocalItems $job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer})){
+            $relative=Get-MediaRelativePath ($item.FullName.Substring($job.LocalPath.Length).TrimStart('\','/'))
+            [void](Get-MediaRemotePath $job.System $relative)
+            $copy=Join-Path $Context.Session ([guid]::NewGuid().ToString('N')+'.source')
+            $hash=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            Copy-Item -LiteralPath $item.FullName -Destination $copy
+            if((Get-FileHash -LiteralPath $copy).Hash-ine$hash){throw 'media 원본이 준비 중 변경됨'}
+            $files+=[pscustomobject]@{system=$job.System;relativePath=$relative;hash=$hash;size=(Get-Item -LiteralPath $copy).Length;path=$copy}
+        }
+    }
+    return $files
+}
+
+function Get-MediaRemoteHash([string]$Path,[string]$Session) {
+    Assert-RemotePath $Path
+    if(-not$Path.StartsWith('/storage/emulated/0/ES-DE/downloaded_media/',[StringComparison]::Ordinal)){throw 'media 범위 오류'}
+    if(Is-ExcludedRelativePath $Path.Substring('/storage/emulated/0/ES-DE/downloaded_media/'.Length)){throw '예약 media hash 조회 금지'}
+    $q=Quote-Sh $Path
+    $checks='';$parent=$Path.Substring(0,$Path.LastIndexOf('/'))
+    while($parent.StartsWith('/storage/emulated/0/ES-DE/downloaded_media',[StringComparison]::Ordinal)){
+        $p=Quote-Sh $parent
+        $checks+="if [ -L $p ]; then exit 1; elif [ -d $p ]; then cd $p || exit 1; elif [ -e $p ]; then exit 1; fi; "
+        $parent=$parent.Substring(0,$parent.LastIndexOf('/'))
+    }
+    $r=Invoke-Adb -s $Serial shell ($checks+"if [ -L $q ]; then exit 1; elif [ -f $q ]; then printf PRESENT; elif [ -e $q ]; then exit 1; else printf ABSENT; fi")
+    if($r.Code-ne0 -or $r.StdErr -or $r.StdOut-cnotin@('PRESENT','ABSENT')){throw 'media remote 상태 불명확'}
+    if($r.StdOut-ceq'ABSENT'){return $null}
+    foreach($command in @('sha256sum ','toybox sha256sum ')){
+        $r=Invoke-Adb -s $Serial shell ($command+$q)
+        if($r.Code-eq0 -and -not$r.StdErr -and $r.StdOut.TrimEnd([char]13,[char]10)-match('^([a-fA-F0-9]{64})  '+[regex]::Escape($Path)+'$')){return $matches[1].ToLowerInvariant()}
+    }
+    $copy=Join-Path $Session ([guid]::NewGuid().ToString('N')+'.hash')
+    $r=Invoke-Adb -s $Serial pull $Path $copy
+    if($r.Code-ne0 -or -not(Test-Path -LiteralPath $copy -PathType Leaf)){throw 'media hash unknown: pull 실패'}
+    return (Get-FileHash -LiteralPath $copy).Hash.ToLowerInvariant()
+}
+
+function Prepare-MediaPlan($Jobs,$Sources,$Context) {
+    $operations=@();$conflicts=@();$summary=0
+    $entries=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach($entry in $Context.Manifest.entries){$entries.Add($entry.system+'/'+$entry.relativePath,$entry)}
+    $sourceMap=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach($file in $Sources){$sourceMap.Add($file.system+'/'+$file.relativePath,$file)}
+    foreach($job in $Jobs){
+        Assert-RemotePath $job.RemotePath
+        if($job.RemotePath-cne('/storage/emulated/0/ES-DE/downloaded_media/'+$job.System)){throw 'media job 범위 오류'}
+        $remote=@(Get-RemoteFiles $job.RemotePath);[void]@(Get-RemoteDirs $job.RemotePath)
+        foreach($relative in $remote){if(-not$sourceMap.ContainsKey($job.System+'/'+$relative) -and -not$entries.ContainsKey($job.System+'/'+$relative)){$summary++}}
+        $paths=@(@($Sources|Where-Object system -ceq $job.System|ForEach-Object relativePath)+@($Context.Manifest.entries|Where-Object system -ceq $job.System|ForEach-Object relativePath)|Sort-Object -Unique -CaseSensitive)
+        foreach($relative in $paths){
+            $key=$job.System+'/'+$relative;$path=Get-MediaRemotePath $job.System $relative
+            $current=Get-MediaRemoteHash $path $Context.Session
+            $source=if($sourceMap.ContainsKey($key)){$sourceMap[$key]}else{$null}
+            $entry=if($entries.ContainsKey($key)){$entries[$key]}else{$null}
+            $kind=''
+            if($entry -and $current -and $current-cne$entry.deployedSha256){$conflicts+=('managedModified '+$key);continue}
+            if($source){
+                if(-not$current){$kind='create'}
+                elseif(-not$entry){if($current-cne$source.hash){$conflicts+=('unmanaged collision '+$key)};continue}
+                elseif($current-cne$source.hash){$kind='update'}
+                else{$kind='verify'}
+            }elseif($entry){$kind=if($current){'delete'}else{'forget'}}
+            if($kind){$operations+=[pscustomobject]@{kind=$kind;system=$job.System;relativePath=$relative;remote=$path;oldHash=$current;newHash=$(if($source){$source.hash}else{$null});source=$source;backup=$null;attempted=$false;commitAttempted=$false}}
+        }
+    }
+    Write-Log ('MEDIA PLAN: unmanaged Android-only preserved='+$summary+' operations='+$operations.Count)
+    foreach($conflict in $conflicts){Write-Log ('MEDIA CONFLICT: '+$conflict)}
+    if($conflicts.Count){throw 'media conflict: 원격 변경 전에 전체 작업 차단'}
+    return ,$operations
+}
+
+function Set-MediaRemoteFile([string]$Remote,[string]$Local,[string]$ExpectedHash,[string]$Session,[string]$OldHash,$Operation=$null,$Context=$null,$Journal=$null) {
+    Assert-RemotePath $Remote
+    $root='/storage/emulated/0/ES-DE/downloaded_media/'
+    if(-not$Remote.StartsWith($root,[StringComparison]::Ordinal)){throw 'media 전송 범위 오류'}
+    $parts=$Remote.Substring($root.Length)-split'/',2
+    if($parts.Count-ne2 -or (Get-MediaRemotePath $parts[0] $parts[1])-cne$Remote){throw 'media 전송 경로 오류'}
+    $parent=$Remote.Substring(0,$Remote.LastIndexOf('/'))
+    Ensure-RemoteDir $parent
+    $temporary=$Remote+'.esde-media-new-'+[guid]::NewGuid().ToString('N')
+    $attempted=$false
+    try{
+        if(Get-MediaRemoteHash $temporary $Session){throw 'media temp 경로 충돌'}
+        $attempted=$true;$r=Invoke-Adb -s $Serial push $Local $temporary
+        if($r.Code-ne0){throw 'media temp push 실패'}
+        if((Get-MediaRemoteHash $temporary $Session)-cne$ExpectedHash){throw 'media 전송 SHA 검증 실패'}
+        if([string](Get-MediaRemoteHash $Remote $Session)-cne$OldHash){throw 'media rename 직전 외부 변경 감지'}
+        if($Operation){
+            $Operation.commitAttempted=$true
+            try{Write-MediaJson (Join-Path $Context.Session 'journal.json') $Journal $Context.StateRoot}
+            catch{$Operation.commitAttempted=$false;throw}
+        }
+        $r=Invoke-Adb -s $Serial shell ('mv -f '+(Quote-Sh $temporary)+' '+(Quote-Sh $Remote))
+        if($r.Code-ne0 -or $r.StdErr){throw 'media rename 실패/완료 여부 불명'}
+        $attempted=$false
+        if((Get-MediaRemoteHash $Remote $Session)-cne$ExpectedHash){throw 'media final SHA 검증 실패'}
+    }finally{if($attempted){try{Remove-RemoteFile $temporary}catch{Write-Log ('MEDIA TEMP CLEANUP FAILED: '+$_.Exception.Message)}}}
+}
+
+function Save-MediaManifest($Context,$Manifest) {
+    if($Context.OriginalBytes){
+        $before=Join-Path $Context.Session 'original-manifest.json'
+        if(-not(Test-Path -LiteralPath $Context.ManifestPath) -or (Get-FileHash -LiteralPath $Context.ManifestPath).Hash-cne(Get-FileHash -LiteralPath $before).Hash){throw 'media manifest concurrent modification'}
+    }elseif(Test-Path -LiteralPath $Context.ManifestPath){throw 'media manifest가 실행 중 새로 생성됨'}
+    Assert-MediaManifest $Manifest $Context
+    # 생성한 JSON도 다시 파싱/계약 검증한다.
+    $roundtrip=$Manifest|ConvertTo-Json -Depth 12|ConvertFrom-Json
+    Assert-MediaManifest $roundtrip $Context
+    Write-MediaJson $Context.ManifestPath $roundtrip $Context.StateRoot
+}
+
+function Restore-MediaManifest($Context,$AttemptedManifest) {
+    if(Test-Path -LiteralPath $Context.ManifestPath){
+        $disk=(Get-FileHash -LiteralPath $Context.ManifestPath).Hash.ToLowerInvariant()
+        if($Context.OriginalBytes){
+            $before=Join-Path $Context.Session 'original-manifest.json'
+            if($disk-ceq(Get-FileHash -LiteralPath $before).Hash.ToLowerInvariant()){return}
+        }
+        $attempt=Get-MediaTextHash ($AttemptedManifest|ConvertTo-Json -Depth 12)
+        if($disk-cne$attempt){throw 'manifest rollback 중 외부 변경 감지'}
+    }
+    if($Context.OriginalBytes){
+        $temporary=$Context.ManifestPath+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+        try{
+            [IO.File]::WriteAllBytes($temporary,$Context.OriginalBytes)
+            if(Test-Path -LiteralPath $Context.ManifestPath){[IO.File]::Replace($temporary,$Context.ManifestPath,$Context.ManifestPath+'.bak')}
+            else{[IO.File]::Move($temporary,$Context.ManifestPath)}
+        }finally{if(Test-Path -LiteralPath $temporary){[IO.File]::Delete($temporary)}}
+    }elseif(Test-Path -LiteralPath $Context.ManifestPath){[IO.File]::Delete($Context.ManifestPath)}
+}
+
+function Invoke-MediaTransaction($Plan,$Context) {
+    $manifest=$Context.Manifest|ConvertTo-Json -Depth 12|ConvertFrom-Json
+    $journal=[pscustomobject]@{state='applying';operations=$Plan}
+    $journalPath=Join-Path $Context.Session 'journal.json'
+    $committed=$false
+    try{
+        # 어떤 media 변경보다 먼저 모든 기존 managed 파일을 백업/검증한다.
+        foreach($operation in $Plan){
+            if((Get-MediaRemoteHash $operation.remote $Context.Session)-cne$operation.oldHash){throw 'media concurrent modification'}
+            if($operation.kind-in@('create','update','delete')){
+                if((Get-MediaRemoteHash $operation.remote $Context.Session)-cne$operation.oldHash){throw 'media concurrent modification'}
+                if($operation.oldHash){
+                    $operation.backup=Join-Path $Context.Session ([guid]::NewGuid().ToString('N')+'.backup')
+                    $r=Invoke-Adb -s $Serial pull $operation.remote $operation.backup
+                    if($r.Code-ne0 -or -not(Test-Path -LiteralPath $operation.backup) -or (Get-FileHash -LiteralPath $operation.backup).Hash-ine$operation.oldHash){throw 'media backup 검증 실패'}
+                }
+            }
+        }
+        Write-MediaJson $journalPath $journal $Context.StateRoot
+        foreach($operation in $Plan){
+            $key=$operation.system+'/'+$operation.relativePath
+            if($operation.kind-in@('create','update','delete')){
+                if((Get-MediaRemoteHash $operation.remote $Context.Session)-cne$operation.oldHash){throw 'media concurrent modification'}
+                $operation.attempted=$true
+                Write-MediaJson $journalPath $journal $Context.StateRoot
+                if($operation.kind-eq'delete'){
+                    $operation.commitAttempted=$true
+                    try{Write-MediaJson $journalPath $journal $Context.StateRoot}catch{$operation.commitAttempted=$false;throw}
+                    Remove-RemoteFile $operation.remote;if(Get-MediaRemoteHash $operation.remote $Context.Session){throw 'media delete 확인 실패'}
+                }
+                else{Set-MediaRemoteFile $operation.remote $operation.source.path $operation.newHash $Context.Session $operation.oldHash $operation $Context $journal}
+                Write-Log ('MEDIA SUCCESS: '+$operation.kind+' '+$key)
+            }
+            $manifest.entries=@($manifest.entries|Where-Object {($_.system+'/'+$_.relativePath)-cne$key})
+            if($operation.kind-in@('create','update','verify')){
+                $now=(Get-Date).ToUniversalTime().ToString('o')
+                $deployed=$now
+                if($operation.kind-eq'verify'){$deployed=@($Context.Manifest.entries|Where-Object {($_.system+'/'+$_.relativePath)-ceq$key})[0].deployedAt}
+                $manifest.entries+=[pscustomobject]@{system=$operation.system;relativePath=$operation.relativePath;sourceSha256=$operation.source.hash;deployedSha256=$operation.source.hash;sourceSize=$operation.source.size;deployedAt=$deployed;lastVerifiedAt=$now}
+            }
+        }
+        $manifest.updatedAt=(Get-Date).ToUniversalTime().ToString('o')
+        Save-MediaManifest $Context $manifest
+        $committed=$true;$journal.state='completed'
+        Write-MediaJson $journalPath $journal $Context.StateRoot
+        Write-Log 'MEDIA MANIFEST COMMIT: pass'
+    }catch{
+        $original=$_.Exception.Message;Write-Log ('MEDIA ORIGINAL ERROR: '+$original)
+        if($committed){throw ('MEDIA FATAL: manifest commit 완료, journal 정리 필요: '+$Context.Session+' / '+$original)}
+        $rollbackErrors=@()
+        $attempts=@($Plan|Where-Object commitAttempted -eq $true);[array]::Reverse($attempts)
+        foreach($operation in $attempts){
+            if(-not$operation){continue}
+            try{
+                $current=Get-MediaRemoteHash $operation.remote $Context.Session
+                if($current-ceq$operation.oldHash){continue}
+                if($current -and $current-cne$operation.newHash){throw 'rollback 중 외부 변경 감지'}
+                if($operation.oldHash){Set-MediaRemoteFile $operation.remote $operation.backup $operation.oldHash $Context.Session $current}
+                elseif($current){Remove-RemoteFile $operation.remote}
+                Write-Log ('MEDIA ROLLBACK: pass '+$operation.remote)
+            }catch{$rollbackErrors+=$_.Exception.Message;Write-Log ('MEDIA ROLLBACK FAILED: '+$operation.remote+' '+$_.Exception.Message)}
+        }
+        try{Restore-MediaManifest $Context $manifest}catch{$rollbackErrors+=$_.Exception.Message;Write-Log ('MEDIA MANIFEST ROLLBACK FAILED: '+$_.Exception.Message)}
+        if($rollbackErrors.Count){$journal.state='rollback_failed';try{Write-MediaJson $journalPath $journal $Context.StateRoot}catch{};throw ('MEDIA FATAL: '+$original+' / rollback: '+($rollbackErrors-join'; ')+' / backup: '+$Context.Session)}
+        $journal.state='rolled_back';Write-MediaJson $journalPath $journal $Context.StateRoot
+        throw $original
+    }
+}
+
+function Close-MediaSession($Context) {
+    if(-not$Context){return}
+    try{
+        $path=Join-Path $Context.Session 'journal.json';[void](Assert-MediaDiskPath $path $Context.StateRoot)
+        $journal=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json
+        if($journal.state-eq'preparing'){$journal.state='rolled_back';Write-MediaJson $path $journal $Context.StateRoot}
+        if($journal.state-in@('completed','rolled_back')){
+            foreach($file in @(Get-ChildItem -LiteralPath $Context.Session -File|Where-Object {$_.Name-cmatch'^[a-f0-9]{32}\.(source|backup|hash)$'})){
+                [void](Assert-MediaDiskPath $file.FullName $Context.StateRoot);Remove-Item -LiteralPath $file.FullName
+            }
+        }
+    }catch{Write-Log ('MEDIA SESSION CLEANUP FAILED: '+$_.Exception.Message)}
+}
+
 function Write-EsdeLifecycleLog([string]$Message) {
     try { Write-Log $Message } catch {}
 }
@@ -1009,6 +1316,7 @@ function Invoke-EsdeSync([scriptblock]$Work) {
 }
 
 $esdeLifecycleStarted = $false
+$mediaContext=$null
 try {
     Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
     Write-Status "starting" "ADB 연결 확인 중..." 0 1
@@ -1057,6 +1365,9 @@ try {
         if (Test-Path -LiteralPath $job.LocalPath) { [void]@(Get-ManagedLocalItems $job.LocalPath $SourceRoot) }
         if($job.Bucket.Local-eq'gamelists'){$job|Add-Member -NotePropertyName GamelistSource -NotePropertyValue (Get-GamelistSource $job.LocalPath)}
     }
+    $mediaJobs=@($jobs|Where-Object {$_.Bucket.Local-eq'downloaded_media'})
+    $mediaContext=New-MediaContext $StateDir $SourceRoot $Serial
+    $mediaSources=@(Get-MediaSourceFiles $mediaJobs $mediaContext)
 
     $esdeLifecycleStarted = $true
     Invoke-EsdeSync {
@@ -1066,6 +1377,8 @@ try {
         # ES-DE 종료 후 모든 Android XML을 pull/병합 검증해야 어떤 bucket의 변경도 시작한다.
         $gamelistPlans=@{}
         foreach($job in $jobs){if($job.Bucket.Local-eq'gamelists'){$gamelistPlans[$job.System]=Prepare-GamelistSystem $job $gamelistSession}}
+        $mediaPlan=Prepare-MediaPlan $mediaJobs $mediaSources $mediaContext
+        $mediaApplied=$false
         $i = 0
         foreach ($job in $jobs) {
             $i++
@@ -1075,6 +1388,9 @@ try {
     
             if($job.Bucket.Local-eq'gamelists'){
                 Sync-GamelistSystem $gamelistPlans[$job.System]
+            }
+            elseif($job.Bucket.Local-eq'downloaded_media'){
+                if(-not$mediaApplied){Invoke-MediaTransaction $mediaPlan $mediaContext;$mediaApplied=$true}
             }
             elseif (Test-Path -LiteralPath $job.LocalPath) {
                 Mirror-SystemFolder $job.LocalPath $job.RemotePath $label
@@ -1114,4 +1430,7 @@ catch {
 }
 
 }
-finally { [Environment]::CurrentDirectory=$PreviousProcessDirectory; Exit-AppMutex $OperationMutex }
+finally {
+    try { if($mediaContext){Close-MediaSession $mediaContext} }
+    finally { [Environment]::CurrentDirectory=$PreviousProcessDirectory; Exit-AppMutex $OperationMutex }
+}
