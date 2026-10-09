@@ -98,3 +98,6 @@ RetroArch savefile_directory=/storage/emulated/0/RetroArch/saves, savestate_dire
 sort_savefiles_enable/sort_savestates_enable=true, content-dir/by-content=false.
 SameBoy .srm/.rtc 실파일은 관찰했으나 state/slot/auto state 실파일 및 모든 override 증거가 없어 mapping은 UNKNOWN이다.
 fixture의 known mapping은 가상 검증 자료이며 실제 emulator 지원 등록이 아니다.
+
+## 실환경 검증 checkpoint
+Stage 3.2 단일 UNMANAGED → LOCAL_ONLY 흐름은 PASS했다. 범위와 한계는 [실환경 검증](v150-stage3-runtime-validation.md)을 참조한다.
