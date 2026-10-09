@@ -169,10 +169,10 @@ Put '/storage/emulated/0/ROMs/gb/renamed.gb' 'MANAGED'
 $xmlBefore=Hash $script:Remote[$XmlRemote]
 $p=Prepare
 Check (@($p.Inventory|Where-Object Classification -CEQ MANAGED_PATH_MISMATCH).Count-eq1) 'path mismatch recognized'
-Check ($p.ReviewRequired -and $p.Moves.Count-eq0 -and $p.ProtectMedia -and $p.XmlPlan.ClassificationCommitted) 'path mismatch REVIEW no ROM/XML/media mutation'
+Check ($p.ReviewRequired -and $p.Moves.Count-eq1 -and $p.ProtectMedia -and $p.ReviewIsolation.ExcludedRomPaths -contains 'managed.gb') 'path mismatch per-file ROM/whole-node isolation'
 $callStart=$Calls.Count
 Apply $p;Sync-ClassifiedManagedRom $RomJob $p 'MOCK'
-Check ($Calls.Count-eq$callStart -and (Hash $script:Remote[$XmlRemote])-ceq$xmlBefore) 'path mismatch no I/O mutation'
+Check ((Hash $script:Remote['/storage/emulated/0/ROMs/gb/renamed.gb'])-ceq(Hash (Bytes 'MANAGED'))) 'path mismatch review ROM preserved'
 Check (-not$script:Remote.ContainsKey('/storage/emulated/0/ROMs/gb/managed.gb')) 'canonical duplicate not copied'
 # Duplicate SHA: whole system remains unchanged.
 Setup
@@ -180,7 +180,7 @@ Setup
 $script:Remote.Remove('/storage/emulated/0/ROMs/gb/managed.gb');Put '/storage/emulated/0/ROMs/gb/renamed.gb' 'MANAGED'
 $p=Prepare
 Check (@($p.Inventory|Where-Object Classification -CEQ AMBIGUOUS).Count-eq1) 'ambiguous multiple managed candidates'
-Check ($p.ReviewRequired -and $p.Moves.Count-eq0 -and $p.ProtectMedia -and $p.XmlPlan.ClassificationCommitted) 'ambiguous ROM/XML/media/save/state no mutation'
+Check ($p.ReviewRequired -and $p.Moves.Count-eq1 -and $p.ProtectMedia -and $p.ReviewIsolation.ExcludedRomPaths.Count-eq3) 'ambiguous candidate group isolation'
 # Managed fast path still deploys missing source files in a read-only source fixture.
 Setup;$p=Prepare
 Apply $p

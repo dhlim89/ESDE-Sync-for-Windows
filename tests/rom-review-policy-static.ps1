@@ -37,14 +37,15 @@ $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'unregistered-move-stati
 Check ($source.Contains('conflict media managed deployment')) 'conflict media integration fixture retained'
 foreach($kind in @('MANAGED_PATH_MISMATCH','AMBIGUOUS')){
  Setup
+ $script:Remote.Remove('/storage/emulated/0/ROMs/gb/Hacks/fan.gb')
  $script:Remote.Remove('/storage/emulated/0/ROMs/gb/managed.gb');Put '/storage/emulated/0/ROMs/gb/renamed.gb' 'MANAGED'
  if($kind-ceq'AMBIGUOUS'){[IO.File]::WriteAllText((Join-Path $SourceRoot 'roms/gb/copy.gb'),'MANAGED')}
  $p=Prepare;$beforeCalls=$Calls.Count;$beforeXml=Hash $script:Remote[$XmlRemote]
  $item=@($p.Inventory|Where-Object Classification -CEQ $kind)[0];$n=Get-RomClassificationNotice $item
  Check ($item.Action-ceq'REVIEW') ($kind+' action')
- Check ($p.ReviewRequired -and $p.Moves.Count-eq0 -and $p.ProtectMedia -and $p.XmlPlan.ClassificationCommitted) ($kind+' ROM/XML/media gate')
+ Check ($p.ReviewRequired -and $p.Moves.Count-eq0 -and $p.ProtectMedia -and $p.ReviewIsolation.ExcludedRomPaths.Count-ge2) ($kind+' ROM/XML/media gate')
  Apply $p;Sync-ClassifiedManagedRom $RomJob $p 'MOCK'
- Check ($Calls.Count-eq$beforeCalls) ($kind+' mutation jobs 0')
+ Check (@($Calls|Select-Object -Skip $beforeCalls|Where-Object {$_-match' push |mv |rm '}).Count-eq0) ($kind+' mutation jobs 0')
  Check ((Hash $script:Remote[$XmlRemote])-ceq$beforeXml) ($kind+' gamelist rewrite 0')
  Check (-not$script:Remote.ContainsKey('/storage/emulated/0/ROMs/gb/managed.gb')) ($kind+' duplicate canonical suppressed')
  Check ($n.CanonicalPaths -contains'managed.gb' -and $n.ShaCandidates.Count-eq$(if($kind-ceq'AMBIGUOUS'){2}else{1})) ($kind+' candidate paths retained')

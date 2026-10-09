@@ -116,7 +116,7 @@ directory fast-push도 파일별 wrapper를 통하므로 conflict를 덮어쓰�
 local-only media 보호 때문에 system media를 보류하는 독립 조건은 그대로이다.
 
 PATH_MISMATCH는 동일 managed content의 존재 증거이다.
-현재 mapping UNKNOWN이므로 system ROM/XML/media 전체 REVIEW로 보류하여
+현재 mapping UNKNOWN이므로 system review ROM/candidate와 기존 game별 보존, media system REVIEW로 보류하여
 canonical 추가 push/ROM-only rename/추측 save/state/media 변경을 막는다.
 AMBIGUOUS도 system 전체 보류이며 모든 후보 경로를 보존한다.
 이는 안전한 per-file media 연결을 입증하지 못한 현재 architecture의 보수적 경계이다.
@@ -129,3 +129,15 @@ NoMutationReviewCount 및 classification+reason별 집계와 항목 안내를 �
 Conflict warning도 ReviewCount에 포함하지만 no-mutation REVIEW와 구분한다.
 이번 stage에서는 summary를 GUI/status 계약에 연결하지 않고 fixture만 검증한다.
 현재 GUI는 worker status message와 sync.log를 읽으므로 이후 연결 가능하다.
+[파일 단위 REVIEW 및 완료 요약]
+ROM REVIEW pair/group은 Android path + managed 후보 전체를 함께 제외한다.
+다른 SHA의 managed ROM은 계속 sync한다. 원본에서 사라진 일반 ROM은 삭제 근거가 없으므로
+기존 UNMANAGED 이동 정책을 따른다. review 때문에 새 삭제 정책을 만들지 않는다.
+gamelist master의 review 후보는 Android-bound copy에서 제외하고 기존 Android game만 whole-node 보존한다.
+후보에 기존 Android node가 없으면 canonical game을 추가하지 않는다.
+media의 game↔file 대응은 미확정이므로 review가 있는 system 전체를 보류한다.
+ReviewIsolation에는 Sha256/AndroidPaths/ManagedCandidatePaths 및 RomAction/GamelistAction/MediaAction을 기록한다.
+성공 후 summary를 status.json에 추가하고 기존 GUI 완료 MessageBox가 한국어 counts/reasons를 표시한다.
+ReviewCount=0이면 상세 확인 영역을 생략하며 SHA/enum은 UI에 표시하지 않는다.
+dialog는 최대 5개 항목을 표시하고 나머지는 상세 로그로 안내한다. 기존 별도 결과 복사 기능은 없다.
+오류 종료는 기존 실패 창을 유지한다. summary는 성공한 작업 및 ES-DE 재실행 후에만 완료 status에 포함된다.

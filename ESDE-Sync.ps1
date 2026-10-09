@@ -31,6 +31,32 @@ $IconFile = Join-Path $InstallDir "esde-sync-icon-v141.ico"
 
 New-Item -ItemType Directory -Force -Path $AppRoot, $StateDir | Out-Null
 
+function Format-SyncCompletionMessage($Summary) {
+    if($null-eq$Summary){return 'Android 동기화가 완료되었습니다.'}
+    $lines=@(
+        '동기화 완료'
+        ''
+        ('관리 ROM: '+[int]$Summary.ManagedCount)
+        ('비관리 ROM 이동: '+[int]$Summary.UnmanagedMoveCount)
+        ('로컬 전용: '+[int]$Summary.LocalOnlyCount)
+        ('확인 필요: '+[int]$Summary.ReviewCount)
+    )
+    if([int]$Summary.ReviewCount-gt0){
+        $lines+=@('','확인 필요 항목')
+        foreach($item in @($Summary.Items|Select-Object -First 5)){
+            $reason=switch($item.Classification){
+                'MANAGED_CONFLICT' {'기기의 ROM 버전이 관리본과 다릅니다. ROM은 보존했습니다. 버전·리비전·패치를 확인해 주세요.'}
+                'MANAGED_PATH_MISMATCH' {'같은 ROM이지만 파일 이름 또는 경로가 다릅니다. 세이브 보호를 위해 자동 변경하지 않았습니다.'}
+                'AMBIGUOUS' {'관리 ROM 대응 후보가 여러 개이거나 경로가 모호합니다. 자동 변경하지 않았습니다.'}
+                default {'상세 로그에서 확인이 필요한 항목을 검토해 주세요.'}
+            }
+            $lines+=@(('- '+$item.System+'/'+$item.RelativePath),('  '+$reason))
+        }
+        if([int]$Summary.ReviewCount-gt5){$lines+=('그 외 '+([int]$Summary.ReviewCount-5)+'개 항목은 상세 로그를 확인해 주세요.')}
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
 function Get-AdbPath {
     if (Test-Path $BundledAdb) { return $BundledAdb }
     $cmd = Get-Command adb.exe -ErrorAction SilentlyContinue
@@ -488,7 +514,9 @@ $timer.Add_Tick({
         if ($code -eq 0) {
             $progress.Value = 100
             $statusLabel.Text = "동기화 완료"
-            [System.Windows.Forms.MessageBox]::Show("Android 동기화가 완료되었습니다.") | Out-Null
+            $completionSummary=$null
+            if($st -and $st.state-ceq'done'){$completionSummary=$st.summary}
+            [System.Windows.Forms.MessageBox]::Show((Format-SyncCompletionMessage $completionSummary), '동기화 결과') | Out-Null
         } else {
             $statusLabel.Text = "동기화 실패"
             [System.Windows.Forms.MessageBox]::Show("동기화에 실패했습니다. 로그를 확인하세요.") | Out-Null

@@ -61,11 +61,12 @@ function Write-Log([string]$Message) {
     }
 }
 
-function Write-Status([string]$State,[string]$Message,[int]$Current,[int]$Total) {
+function Write-Status([string]$State,[string]$Message,[int]$Current,[int]$Total,$Summary=$null) {
     $percent = 0
     if ($Total -gt 0) { $percent = [math]::Floor(($Current / $Total) * 100) }
-    @{state=$State;message=$Message;current=$Current;total=$Total;percent=$percent} |
-        ConvertTo-Json | Set-Content -LiteralPath $StatusFile -Encoding UTF8
+    $record=@{state=$State;message=$Message;current=$Current;total=$Total;percent=$percent}
+    if($null-ne$Summary){$record.summary=$Summary}
+    $record|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $StatusFile -Encoding UTF8
 }
 
 function Join-CommandLineArgument([string]$arg) {
@@ -1028,6 +1029,19 @@ function Get-RomReviewSummary([object[]]$Entries) {
     }
 }
 
+function Get-RomReviewIsolation([object[]]$Entries) {
+    $review=@($Entries|Where-Object Action -CEQ REVIEW)
+    $paths=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $groups=@()
+    foreach($group in @($review|Group-Object Sha256)){
+        $android=@($group.Group|ForEach-Object RelativePath|Sort-Object -Unique)
+        $candidates=@($group.Group|ForEach-Object {@($_.MatchedDropboxPaths)+@($_.MatchedShaPaths)}|Sort-Object -Unique)
+        foreach($path in @($android)+@($candidates)){[void]$paths.Add($path)}
+        $groups+=[pscustomobject]@{Sha256=$group.Name;AndroidPaths=$android;ManagedCandidatePaths=$candidates;RomAction='Preserve';GamelistAction='PreserveExisting';MediaAction='ReviewSystem'}
+    }
+    return [pscustomobject]@{Groups=$groups;ExcludedRomPaths=@($paths);PreservedGamePaths=@($paths|ForEach-Object {'./'+$_});HoldMedia=($review.Count-gt0)}
+}
+
 function New-ManagedCanonicalizationPlan($Classification,$Mapping,[object[]]$Bindings,[string[]]$ExistingPaths,[string[]]$ExistingGamePaths=@()) {
     # Pure proposal only. No real emulator is currently registered as verified.
     $review=[pscustomobject]@{Status='REVIEW';Reason='save/state/media mapping not verified';Operations=@()}
@@ -1127,7 +1141,8 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
         Write-RomClassificationNotice $entry
     }
     $moves=@($classification|Where-Object Action -EQ MOVE_TO_UNREGISTERED)
-    if($review){$moves=@();Write-Log ('ROM REVIEW: '+$RomJob.System+' ROM/XML/media 모두 보존; canonical 중복 전송 없음')}
+    $isolation=Get-RomReviewIsolation $classification
+    if($review){Write-Log ('ROM REVIEW: '+$RomJob.System+' 검토 경로/후보만 ROM 제외, existing XML 보존, system media 보류')}
     $local=if($XmlPlan.Local){ConvertFrom-EsdeGamelistBytes $XmlPlan.Local.Bytes}else{$null}
     $existing=@(Get-EsdeGameEntries $local)
     foreach($move in $moves){
@@ -1143,13 +1158,20 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
     # ROM source of truth: normal nodes not backed by source ROM remain whole-node (stale included).
     $sourceKeys=@($source|Where-Object {-not(Is-ClassificationAuxiliaryPath $_.RelativePath)}|ForEach-Object {'./'+$_.RelativePath})
     $preserve=@(Get-EsdeGameEntries $local|Where-Object {$_.Class-eq'Managed' -and $sourceKeys-cnotcontains$_.Key}|ForEach-Object Key)
-    $bound=$null
-    if(-not$review){$bound=Get-AndroidBoundGamelist $XmlJob.GamelistSource $local $RomJob.System $preserve}
+    $preserve+=@($isolation.PreservedGamePaths)
+    $master=$XmlJob.GamelistSource
+    if($review -and $master){
+        $master=ConvertFrom-EsdeGamelistBytes $master.Bytes
+        foreach($entry in @(Get-EsdeGameEntries $master)){
+            if($isolation.PreservedGamePaths-ccontains$entry.Key){[void]$entry.Node.ParentNode.RemoveChild($entry.Node)}
+        }
+        $master.Bytes=ConvertTo-EsdeGamelistBytes $master
+    }
+    $bound=Get-AndroidBoundGamelist $master $local $RomJob.System $preserve
     $output=$null
     if($bound){$output=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-classified.xml');[void](Write-EsdeGamelist $bound $output)}
     $xml=$XmlPlan.PSObject.Copy();$xml.Output=$output
-    if($review){$xml.ClassificationCommitted=$true}
-    return [pscustomobject]@{System=$RomJob.System;RomJob=$RomJob;Source=$source;Moves=$moves;Inventory=$classification;XmlPlan=$xml;Session=$Session;ReviewRequired=$review;ProtectMedia=($review -or $moves.Count-gt0 -or (Test-LocalOnlySystemPresence $RomJob.RemotePath) -or @(Get-LocalOnlyGameEntries $local).Count-gt0);Validated=$true}
+    return [pscustomobject]@{System=$RomJob.System;RomJob=$RomJob;Source=$source;Moves=$moves;Inventory=$classification;XmlPlan=$xml;Session=$Session;ReviewRequired=$review;ReviewIsolation=$isolation;ProtectMedia=($review -or $moves.Count-gt0 -or (Test-LocalOnlySystemPresence $RomJob.RemotePath) -or @(Get-LocalOnlyGameEntries $local).Count-gt0);Validated=$true}
 }
 
 function Assert-ClassificationSourceSnapshot($Plan) {
@@ -1218,7 +1240,6 @@ function Invoke-ClassificationMoves([object[]]$Plans,$Context,[string]$Session) 
 }
 
 function Confirm-ClassificationInventory($Plan,[string]$Session) {
-    if($Plan.ReviewRequired){return}
     Assert-ClassificationSourceSnapshot $Plan
     $rows=@(Get-ClassificationAndroidRows $Plan.RomJob $Session)
     $refresh=@(New-UnregisteredClassificationPlan $Plan.System $Plan.Source $rows @() $selectedSystems)
@@ -1231,11 +1252,11 @@ function Confirm-ClassificationInventory($Plan,[string]$Session) {
 
 function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
     if($Job.System-cne$Plan.System -or $Job.RemotePath-cne$Plan.RomJob.RemotePath){throw 'managed mirror scope'}
-    if($Plan.ReviewRequired){Write-Log ('ROM REVIEW: mirror skipped '+$Job.System);return}
     $files=(Get-Item Function:Get-RemoteFiles).ScriptBlock;$dirs=(Get-Item Function:Get-RemoteDirs).ScriptBlock
     $adb=(Get-Item Function:Invoke-Adb).ScriptBlock
     $allowed=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $conflicts=@($Plan.Inventory|Where-Object Classification -CEQ MANAGED_CONFLICT|ForEach-Object RelativePath)
+    $conflicts+=@($Plan.ReviewIsolation.ExcludedRomPaths)
     $transfer=@($Plan.Source|Where-Object {$conflicts-cnotcontains$_.RelativePath -and (-not(Is-ClassificationAuxiliaryPath $_.RelativePath) -or $_.RelativePath-cin@('metadata.txt','systeminfo.txt'))})
     foreach($row in $transfer){[void]$allowed.Add($row.RelativePath)}
     $root=$Job.RemotePath
@@ -1924,6 +1945,7 @@ try {
                 }
             }
         }
+        $script:RomCompletionSummary=Get-RomReviewSummary @($classificationPlans|ForEach-Object Inventory)
         } finally {
             try {
                 $incomplete=@();try{[void](New-ClassificationContext $StateDir $SourceRoot $Serial)}catch{$incomplete=@($_)}
@@ -1933,7 +1955,7 @@ try {
             catch { Write-Log ('GAMELIST PC STAGING CLEANUP FAILED: '+$_.Exception.Message) }
         }
     }
-    Write-Status "done" "동기화 완료" $jobs.Count $jobs.Count
+    Write-Status "done" "동기화 완료" $jobs.Count $jobs.Count $script:RomCompletionSummary
     Write-Log "===== SELECTED-SYSTEM MIRROR COMPLETE ====="
     exit 0
 }
