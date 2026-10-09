@@ -104,9 +104,9 @@ Check ($script:Calls.Count-eq3) '미선택 시스템 원격 조회 없음 (prefl
 # 실행부 AST 순서 검사: 전체 source validation -> lifecycle -> 모든 gamelist 준비 -> 일반 job 변경.
 $source=[IO.File]::ReadAllText((Join-Path $repo 'sync-worker.ps1'))
 Check ($source.IndexOf('GamelistSource -NotePropertyValue (Get-GamelistSource')-lt$source.LastIndexOf('Invoke-EsdeSync {')) '전체 source 단계에 Dropbox parse 연결'
-$xmlPrepare=$source.IndexOf('Prepare-GamelistSystem $xmlJob $gamelistSession');$mirror=$source.LastIndexOf('Sync-ClassifiedManagedRom $job')
+$xmlPrepare=$source.LastIndexOf('$prepared=Prepare-RomSystemSync $romJob $xmlJob $gamelistSession');$mirror=$source.LastIndexOf('Sync-RomSystem $job')
 Check ($xmlPrepare-ge0 -and $mirror-ge0 -and $xmlPrepare-lt$mirror) '모든 Android 병합 준비가 ROM 변경보다 먼저'
-$classificationPrepare=$source.IndexOf('Prepare-ClassificationSystem $romJob');$classificationApply=$source.LastIndexOf('Invoke-ClassificationMoves $classificationPlans')
+$classificationPrepare=$xmlPrepare;$classificationApply=$source.LastIndexOf('Invoke-ClassificationMoves $classificationPlans')
 Check ($classificationPrepare-ge0 -and $classificationApply-ge0 -and $classificationPrepare-lt$classificationApply) '모든 classification 준비가 mutation보다 먼저'
 $mediaPrepare=$source.IndexOf('Prepare-MediaPlan $activeMediaJobs')
 Check ($mediaPrepare-ge0 -and $classificationApply-ge0 -and $mediaPrepare-lt$classificationApply) 'media 검증도 classification mutation보다 먼저'

@@ -1,0 +1,15 @@
+﻿{
+    "state":  "done",
+    "message":  "동기화 완료",
+    "current":  1,
+    "total":  1,
+    "summary":  {
+                    "ManagedCount":  97,
+                    "UnmanagedMoveCount":  1,
+                    "LocalOnlyCount":  2,
+                    "ReviewCount":  0,
+                    "Items":  [
+
+                              ]
+                }
+}

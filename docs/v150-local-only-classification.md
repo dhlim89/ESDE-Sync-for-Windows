@@ -118,7 +118,7 @@ local-only media 보호 때문에 system media를 보류하는 독립 조건은 
 PATH_MISMATCH는 동일 managed content의 존재 증거이다.
 현재 mapping UNKNOWN이므로 system review ROM/candidate와 기존 game별 보존, media system REVIEW로 보류하여
 canonical 추가 push/ROM-only rename/추측 save/state/media 변경을 막는다.
-AMBIGUOUS도 system 전체 보류이며 모든 후보 경로를 보존한다.
+AMBIGUOUS도 ROM은 후보 경로 group만 보류하며 gamelist 기존 node를 보존하고 media만 system 전체를 보류한다.
 이는 안전한 per-file media 연결을 입증하지 못한 현재 architecture의 보수적 경계이다.
 
 Get-RomClassificationNotice/Write-RomClassificationNotice는 한국어 안내와
@@ -127,7 +127,7 @@ ROM bytes는 기록하지 않는다.
 Get-RomReviewSummary는 ManagedCount/UnmanagedMoveCount/ReviewCount,
 NoMutationReviewCount 및 classification+reason별 집계와 항목 안내를 반환한다.
 Conflict warning도 ReviewCount에 포함하지만 no-mutation REVIEW와 구분한다.
-이번 stage에서는 summary를 GUI/status 계약에 연결하지 않고 fixture만 검증한다.
+summary는 성공 완료 status.json과 기존 GUI 완료 MessageBox에 연결한다.
 현재 GUI는 worker status message와 sync.log를 읽으므로 이후 연결 가능하다.
 [파일 단위 REVIEW 및 완료 요약]
 ROM REVIEW pair/group은 Android path + managed 후보 전체를 함께 제외한다.
@@ -141,3 +141,48 @@ ReviewIsolation에는 Sha256/AndroidPaths/ManagedCandidatePaths 및 RomAction/Ga
 ReviewCount=0이면 상세 확인 영역을 생략하며 SHA/enum은 UI에 표시하지 않는다.
 dialog는 최대 5개 항목을 표시하고 나머지는 상세 로그로 안내한다. 기존 별도 결과 복사 기능은 없다.
 오류 종료는 기존 실패 창을 유지한다. summary는 성공한 작업 및 ES-DE 재실행 후에만 완료 status에 포함된다.
+## Classification capability / legacy managed sync
+자동 classification과 기존 managed sync의 지원 범위는 별개이다.
+Get-RomClassificationCapability는 gb/gbc에 Supported, 그 외 정상 source system 이름에는
+Unsupported, 잘못된 경로/예약 이름에는 Unknown을 반환한다.
+등록된 ES-DE 전체 system catalog를 추측해서 확장하지 않는다.
+Unsupported는 정상 상태로 action=legacy-managed-sync를 로그에 기록한다.
+Get-ClassificationExtensions는 Unsupported에 빈 배열을 반환하며 caller는 분류 자체를 건너뛴다.
+직접 classification planner에 미지원 system을 전달하여 빈 extension을 허용 목록으로 쓰는 것은 금지한다.
+
+Prepare-RomSystemSync는 Supported에서 기존 snapshot/classification pipeline을 호출한다.
+Unsupported에서는 Prepare-GamelistSystem -LegacyManagedSync를 호출하며 분류 plan을 만들지 않는다.
+Sync-RomSystem은 Unsupported에서 기존 Mirror-SystemFolder를 직접 실행한다.
+동일 path의 SHA conflict 추정, 다른 path의 SHA suppression, 자동 ROM 이동은 하지 않는다.
+따라서 일반 Android-only 파일 삭제를 포함한 v1.4.9 strict mirror 의미가 그대로 유지된다.
+_TEST/_UNREGISTERED 구성요소는 여전히 비교/전송/삭제 제외이며 whole-node metadata도 보존된다.
+
+미지원 XML은 새 game-level altemulator 변환을 강요하지 않고 기존 Merge 함수를 사용한다.
+v1.5.0의 runtime tag 및 alternativeEmulator 보존 정책은 유지한다.
+미지원 media는 classification hold 없이 기존 ownership/rollback 정책을 적용한다.
+GB/GBC의 정책과 REVIEW media system hold는 변경하지 않는다.
+미지원 시스템만 선택하면 classification State/journal gate도 실행하지 않는다.
+
+## status.json summary 공식 계약
+ManagedCount, UnmanagedMoveCount, LocalOnlyCount, ReviewCount가 canonical count 필드이다.
+별칭을 추가하지 않는다. worker/GUI/tests는 같은 이름을 사용한다.
+UnmanagedMoveCount는 완료한 UNMANAGED 이동 수를 표시한다.
+현재 counts의 범위는 Supported 시스템 classification inventory이며,
+Unsupported legacy 시스템은 SHA 분류 집계에 넣지 않는다.
+Items의 REVIEW 상세는 UI 최대 5개, 남은 개수는 상세 로그 안내로 표시한다.
+SHA와 technical enum은 기본 UI에 표시하지 않는다.
+summary 없는 이전 status 및 기존 실패 창도 지원한다.
+공식 normal fixture는 tests/gui-summary/normal-status.json이다.
+## Stage 4.2 GUI 육안 smoke / RC checkpoint (2026-10-09)
+표시 전용 TEMP GUI와 공식 status fixture로 사용자가 실제 화면을 확인했다.
+실제 ADB/worker/sync/다운로드/설치는 실행하지 않았다.
+정상 완료(관리 97/이동 1/local-only 2/review 0), Conflict 1개,
+PathMismatch 1개, Ambiguous 1개, REVIEW 8개 및 기존 실패 메시지 모두 육안 PASS.
+96 DPI에서 문구/버튼 잘림, 화면 밖 배치, 줄바꿈 문제 없음.
+REVIEW 상세는 5개만 표시하며 나머지 3개 상세 로그 안내도 정상이다.
+SHA/technical enum은 기본 UI에 노출하지 않는다. Conflict는 완료+확인 필요로 표시한다.
+실제 다른 모니터 DPI 전환은 이번 확인 범위가 아니며 기존 100%/125% layout 모델 검증과 구분한다.
+이 결과는 production GUI 전체 sync 실행이나 실제 설치/업데이트 시험을 의미하지 않는다.
+GB/GBC 외 분류 미지원은 정상 legacy sync를 막지 않으며 GBA 작업 결과는 v1.4.9 parity PASS.
+save/state mapping UNKNOWN, canonicalization 미지원, REVIEW media system hold,
+실기기 REVIEW 사례 부재, GB/GBC 외 자동 분류 미지원, 전용 결과 복사 부재는 non-blocker이다.

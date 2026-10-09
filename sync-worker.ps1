@@ -921,9 +921,45 @@ function Get-ClassificationRelativePath([string]$System,[string]$Path,[string[]]
     return $relative
 }
 
+function Get-RomClassificationCapability([string]$System) {
+    # source의 첫 수준 system을 사용한다. ES-DE 전체 catalog를 추측하지 않는다.
+    # 미지원 정상 이름은 legacy sync, 잘못된 경로/예약 system만 Unknown이다.
+    if([string]::IsNullOrWhiteSpace($System) -or $System-cnotmatch'^[a-zA-Z0-9_-]+$' -or $System-in@('_TEST','_UNREGISTERED') -or $System-match'^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$'){
+        return [pscustomobject]@{System=$System;Status='Unknown';Reason='invalid system identifier'}
+    }
+    $supported=$System-cin@('gb','gbc')
+    return [pscustomobject]@{System=$System;Status=$(if($supported){'Supported'}else{'Unsupported'});Reason=$(if($supported){'verified GB/GBC extension policy'}else{'classification policy not registered; legacy managed sync'})}
+}
+
+function Prepare-RomSystemSync($RomJob,$XmlJob,[string]$Session) {
+    $capability=Get-RomClassificationCapability $RomJob.System
+    if($RomJob.System-cne$XmlJob.System -or $RomJob.System-cnotin$selectedSystems -or $capability.Status-ceq'Unknown'){throw 'CLASSIFICATION BLOCK: invalid system scope'}
+    if($capability.Status-ceq'Unsupported'){
+        Write-Log ('CLASSIFICATION '+$RomJob.System+': unsupported action=legacy-managed-sync')
+        $xml=Prepare-GamelistSystem $XmlJob $Session -LegacyManagedSync
+        return [pscustomobject]@{Capability=$capability;ClassificationPlan=$null;XmlPlan=$xml}
+    }
+    $snapshot=Prepare-GamelistSystem $XmlJob $Session -PreserveNonMasterNodes -SnapshotOnly
+    $plan=Prepare-ClassificationSystem $RomJob $XmlJob $snapshot $Session
+    return [pscustomobject]@{Capability=$capability;ClassificationPlan=$plan;XmlPlan=$plan.XmlPlan}
+}
+
+function Sync-RomSystem($Job,$ClassificationPlan,[string]$Label) {
+    $capability=Get-RomClassificationCapability $Job.System
+    if($capability.Status-ceq'Unknown' -or $Job.System-cnotin$selectedSystems){throw 'CLASSIFICATION BLOCK: invalid system scope'}
+    if($capability.Status-ceq'Unsupported'){
+        if($null-ne$ClassificationPlan){throw 'CLASSIFICATION BLOCK: unsupported system has classification plan'}
+        Mirror-SystemFolder $Job.LocalPath $Job.RemotePath $Label
+        return
+    }
+    if($null-eq$ClassificationPlan){throw 'CLASSIFICATION BLOCK: supported system plan missing'}
+    Sync-ClassifiedManagedRom $Job $ClassificationPlan $Label
+}
 function Get-ClassificationExtensions([string]$System) {
     # Stage 1의 실제 ES-DE GB/GBC 정의에서 확인된 extension만.
-    if($System-cnotin@('gb','gbc')){throw 'CLASSIFICATION BLOCK: ROM extension policy unresolved'}
+    $capability=Get-RomClassificationCapability $System
+    if($capability.Status-ceq'Unknown'){throw 'CLASSIFICATION BLOCK: invalid system identifier'}
+    if($capability.Status-ceq'Unsupported'){return @()}
     return @('.gb','.gbc','.dmg','.gbx','.bs','.cgb','.sgb','.sfc','.smc','.zip','.7z')
 }
 
@@ -933,6 +969,7 @@ function Is-ClassificationAuxiliaryPath([string]$Path) {
 }
 
 function New-UnregisteredClassificationPlan([string]$System,[object[]]$Source,[object[]]$Android,[object[]]$Destinations,[string[]]$Systems) {
+    if((Get-RomClassificationCapability $System).Status-cne'Supported'){throw 'CLASSIFICATION BLOCK: planner requires supported capability'}
     $index=New-ManagedRomShaIndex $System $Source $Systems
     $managed=$index.Paths
     $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
@@ -1401,7 +1438,7 @@ else printf ABSENT; fi
     return ($r.StdOut-ceq'PRESENT')
 }
 
-function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmanagedPaths=@(),[switch]$PreserveNonMasterNodes,[switch]$SnapshotOnly) {
+function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmanagedPaths=@(),[switch]$PreserveNonMasterNodes,[switch]$SnapshotOnly,[switch]$LegacyManagedSync) {
     $remote=$Job.RemotePath+'/gamelist.xml'
     Assert-RemotePath $remote
     $folder=Join-Path $Session ([guid]::NewGuid().ToString('N'))
@@ -1422,7 +1459,13 @@ function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmana
         $baseKeys=@(Get-EsdeGameEntries $Job.GamelistSource|ForEach-Object Key)
         $PreservedUnmanagedPaths+=@(Get-EsdeGameEntries $local|Where-Object {$_.Class-eq'Managed' -and $baseKeys-cnotcontains$_.Key}|ForEach-Object Key)
     }
-    $merged=$null; if(-not$SnapshotOnly){$merged=Get-AndroidBoundGamelist $Job.GamelistSource $local $Job.System $PreservedUnmanagedPaths}
+    $merged=$null
+    if(-not$SnapshotOnly){
+        if($LegacyManagedSync){
+            # 미지원 system은 v1.4.9 XML 경로를 유지: 새 altemulator 정책을 강요하지 않는다.
+            $merged=Merge-EsdeGamelist $Job.GamelistSource $local {param($message)Write-Log ('GAMELIST WARNING: '+$message)}
+        }else{$merged=Get-AndroidBoundGamelist $Job.GamelistSource $local $Job.System $PreservedUnmanagedPaths}
+    }
     $output=$null
     if($merged){
         $output=Join-Path $folder 'merged.xml'
@@ -1886,7 +1929,14 @@ try {
     $mediaJobs=@($jobs|Where-Object {$_.Bucket.Local-eq'downloaded_media'})
     $mediaContext=New-MediaContext $StateDir $SourceRoot $Serial
     $mediaSources=@(Get-MediaSourceFiles $mediaJobs $mediaContext)
-    $classificationContext=New-ClassificationContext $StateDir $SourceRoot $Serial
+    $classificationContext=$null
+    $classificationSystems=@()
+    foreach($system in $selectedSystems){
+        $capability=Get-RomClassificationCapability $system
+        if($capability.Status-ceq'Unknown'){throw 'CLASSIFICATION BLOCK: invalid system identifier'}
+        if($capability.Status-ceq'Supported'){$classificationSystems+=$system}
+    }
+    if($classificationSystems.Count){$classificationContext=New-ClassificationContext $StateDir $SourceRoot $Serial}
     $esdeLifecycleStarted = $true
     Invoke-EsdeSync {
         $gamelistSession=Join-Path ([IO.Path]::GetTempPath()) ('ESDE-gamelist-'+[guid]::NewGuid().ToString('N'))
@@ -1898,10 +1948,9 @@ try {
         foreach($system in $selectedSystems){
             $romJob=@($jobs|Where-Object {$_.System-ceq$system -and $_.Bucket.Local-eq'roms'})[0]
             $xmlJob=@($jobs|Where-Object {$_.System-ceq$system -and $_.Bucket.Local-eq'gamelists'})[0]
-            $xmlPlan=Prepare-GamelistSystem $xmlJob $gamelistSession -PreserveNonMasterNodes -SnapshotOnly
-            $plan=Prepare-ClassificationSystem $romJob $xmlJob $xmlPlan $gamelistSession
-            $classificationPlans+=$plan
-            $gamelistPlans[$system]=$plan.XmlPlan
+            $prepared=Prepare-RomSystemSync $romJob $xmlJob $gamelistSession
+            if($prepared.ClassificationPlan){$classificationPlans+=$prepared.ClassificationPlan}
+            $gamelistPlans[$system]=$prepared.XmlPlan
         }
         # Flat media ownership와 local-only ROM의 연결은 미확정: 해당 system의 media 전체를 보존.
         $protectedMedia=@($classificationPlans|Where-Object ProtectMedia|ForEach-Object System)
@@ -1928,7 +1977,7 @@ try {
                 if(-not$mediaApplied){Invoke-MediaTransaction $mediaPlan $mediaContext;$mediaApplied=$true}
             }
             elseif (Test-Path -LiteralPath $job.LocalPath) {
-                Sync-ClassifiedManagedRom $job @($classificationPlans|Where-Object System -CEQ $job.System)[0] $label
+                Sync-RomSystem $job @($classificationPlans|Where-Object System -CEQ $job.System)[0] $label
             }
             else {
                 # The system is selected via ROMs, but this bucket has no corresponding folder in Dropbox.
@@ -1948,7 +1997,7 @@ try {
         $script:RomCompletionSummary=Get-RomReviewSummary @($classificationPlans|ForEach-Object Inventory)
         } finally {
             try {
-                $incomplete=@();try{[void](New-ClassificationContext $StateDir $SourceRoot $Serial)}catch{$incomplete=@($_)}
+                $incomplete=@();try{if($classificationContext){[void](New-ClassificationContext $StateDir $SourceRoot $Serial)}}catch{$incomplete=@($_)}
                 if($incomplete.Count){Write-Log ('CLASSIFICATION STAGING PRESERVED: '+$gamelistSession)}
                 else{[IO.Directory]::Delete($gamelistSession,$true); Write-Log 'GAMELIST PC STAGING CLEANUP: pass'}
             }

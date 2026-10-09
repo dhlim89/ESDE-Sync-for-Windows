@@ -316,7 +316,7 @@ RC 준비는 정식 Release 게시가 아니며 승인 없이 main/tag/Release�
   flat media naming과 ROM 연결 정책이 미확정이므로 media relocation/삭제/덮어쓰기를 추측하지 않습니다.
 - 기존 Dropbox 쓰기 capability 및 채택 journal/resolution 기능은 제품에서 제거했습니다.
 - 과거 설계 문서는 docs/history에 기록으로 보존합니다. 현재 정책은 docs/v150-local-only-classification.md를 참조하십시오.
-- 현재 확인된 ROM extension catalog는 GB/GBC입니다. 다른 시스템 분류는 정책 확인 전 fail closed입니다.
+- 자동 ROM classification은 검증된 GB/GBC에서만 활성화합니다. GBA/NES/SNES 등 그 외 정상 시스템은 classification을 건너뛰고 기존 managed mirror/delete 및 gamelist/media 동기화를 유지합니다. 잘못된 system 경로는 차단합니다.
 - 실제 monitor DPI 전환은 미검증이며 GUI 코드 변경은 없습니다.
 - 실제 Android/Dropbox 데이터와 이전 시험 ROM/journal/session은 변경하지 않았습니다. mutation 검증은 mock/fixture만이며 실제 GB/GBC는 read-only path/SHA 비교만 수행했습니다.
 [v1.5.0 ROM 분류 최종 정책]
@@ -350,3 +350,18 @@ ReviewIsolation에는 Sha256/AndroidPaths/ManagedCandidatePaths 및 RomAction/Ga
 ReviewCount=0이면 상세 확인 영역을 생략하며 SHA/enum은 UI에 표시하지 않는다.
 dialog는 최대 5개 항목을 표시하고 나머지는 상세 로그로 안내한다. 기존 별도 결과 복사 기능은 없다.
 오류 종료는 기존 실패 창을 유지한다. summary는 성공한 작업 및 ES-DE 재실행 후에만 완료 status에 포함된다.
+[분류 capability와 완료 summary 계약]
+Get-RomClassificationCapability: gb/gbc=Supported, 그 외 정상 system 이름=Unsupported,
+잘못된 경로/예약 system 이름=Unknown(BLOCK). Unsupported는 동기화 오류가 아닙니다.
+Unsupported는 SHA 분류, _UNREGISTERED 자동 이동, REVIEW suppression을 수행하지 않습니다.
+기존 v1.4.9 ROM mirror/delete와 예약 폴더 보호를 그대로 사용합니다.
+Unsupported gamelist는 기존 병합 경로를 사용하며 새 altemulator 변환을 강요하지 않습니다.
+media는 기존 ownership/journal 정책을 유지하고 classification으로 보류하지 않습니다.
+
+status.json의 summary 공식 필드:
+ManagedCount, UnmanagedMoveCount, LocalOnlyCount, ReviewCount.
+UnmanagedMoveCount가 "비관리 ROM 이동" 건수의 유일한 필드입니다. 별칭은 없습니다.
+Items는 상세 REVIEW 안내, Reasons는 이유별 집계입니다.
+현재 counts는 classification Supported 시스템의 inventory를 집계합니다.
+Unsupported legacy 시스템은 SHA 분류 건수에 포함하지 않습니다.
+기존 summary 없는 status와 실패 MessageBox는 계속 지원합니다.

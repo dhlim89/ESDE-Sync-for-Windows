@@ -60,6 +60,9 @@ Check ($r.Status-ceq'REVIEW' -and @($r.Operations).Count-eq0) 'ROM-only proposal
 $source=[IO.File]::ReadAllText((Join-Path $repo 'sync-worker.ps1'))
 Check ($source-notmatch'Install-AdoptionDiskFile|function .*Adoption|adoption-transactions|adoption-resolutions|managed-rom-paths') '폐기 runtime 코드/list/journal 없음'
 Check ($source.Contains('$LocalOnlyFolders = @(''_TEST'', ''_UNREGISTERED'')')) 'local-only 공통 목록'
-Check ($source.IndexOf('Invoke-ClassificationMoves $classificationPlans')-lt$source.LastIndexOf('Sync-ClassifiedManagedRom $job')) 'classification before mirror'
-Check ($source.IndexOf('Confirm-ClassificationInventory $plan')-lt$source.LastIndexOf('Sync-ClassifiedManagedRom $job')) 'refresh before mirror/delete'
+$mirrorCall=$source.LastIndexOf('Sync-RomSystem $job')
+$applyCall=$source.LastIndexOf('Invoke-ClassificationMoves $classificationPlans')
+$refreshCall=$source.LastIndexOf('Confirm-ClassificationInventory $plan')
+Check ($applyCall-ge0 -and $mirrorCall-ge0 -and $applyCall-lt$mirrorCall) 'classification before mirror'
+Check ($refreshCall-ge0 -and $mirrorCall-ge0 -and $refreshCall-lt$mirrorCall) 'refresh before mirror/delete'
 Write-Output ('classification 검증 완료: '+$script:Passed)
