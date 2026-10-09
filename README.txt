@@ -365,3 +365,9 @@ Items는 상세 REVIEW 안내, Reasons는 이유별 집계입니다.
 현재 counts는 classification Supported 시스템의 inventory를 집계합니다.
 Unsupported legacy 시스템은 SHA 분류 건수에 포함하지 않습니다.
 기존 summary 없는 status와 실패 MessageBox는 계속 지원합니다.
+[로컬 전용 건수]
+LocalOnlyCount는 Supported 시스템에서 동기화 시작 시 이미 LOCAL_ONLY로 분류된 ROM 수입니다.
+_TEST/_UNREGISTERED 모두 포함하며 비ROM/sidecar 및 Unsupported legacy 시스템은 집계하지 않습니다.
+이번에 새로 이동한 ROM은 UnmanagedMoveCount에만 포함하여 중복 집계하지 않습니다.
+예: 기존 로컬 전용 2개 + 새 이동 1개 → 비관리 ROM 이동 1 / 로컬 전용 2.
+집계 입력은 classifier 결과이며 mirror/delete 예약 폴더 보호와 GUI 문구는 그대로입니다.

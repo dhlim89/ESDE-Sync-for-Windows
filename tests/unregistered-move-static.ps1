@@ -33,6 +33,12 @@ function Invoke-Adb{
   if($script:Fail-ceq'link'){$r.StdOut='link'}
   return $r
  }
+ if($cmd-match"find '([^']+)' -type f -print0"){
+  $prefix=$matches[1]+'/'
+  $files=@($script:Remote.Keys|Where-Object {$_.StartsWith($prefix,[StringComparison]::Ordinal)}|Sort-Object)
+  $r.StdOut=if($files.Count){($files-join[char]0)+[char]0}else{''}
+  return $r
+ }
  if($cmd.Contains('printf PRESENT')){
   if($cmd-match"-f '([^']+)'"){$path=$matches[1];$r.StdOut=if($script:Remote.ContainsKey($path)){'PRESENT'}else{'ABSENT'}}
   else{$r.StdOut=if(@($script:Remote.Keys|Where-Object {$_ -match '/_(TEST|UNREGISTERED)/'}).Count){'PRESENT'}else{'ABSENT'}}

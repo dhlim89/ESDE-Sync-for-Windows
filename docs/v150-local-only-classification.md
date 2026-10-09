@@ -186,3 +186,25 @@ SHA/technical enum은 기본 UI에 노출하지 않는다. Conflict는 완료+�
 GB/GBC 외 분류 미지원은 정상 legacy sync를 막지 않으며 GBA 작업 결과는 v1.4.9 parity PASS.
 save/state mapping UNKNOWN, canonicalization 미지원, REVIEW media system hold,
 실기기 REVIEW 사례 부재, GB/GBC 외 자동 분류 미지원, 전용 결과 복사 부재는 non-blocker이다.
+## LocalOnlyCount 실제 runtime 집계 (2026-10-10)
+LocalOnlyCount는 Supported 시스템의 동기화 준비 시 분류 결과에서
+LOCAL_ONLY로 판정된 기존 보호 ROM 수이다.
+_TEST와 _UNREGISTERED 모두 포함하며, 검증된 ROM extension만 센다.
+Unsupported legacy 시스템, sidecar/비ROM, CONFLICT/REVIEW/INVALID는 포함하지 않는다.
+
+기존 runtime Get-ClassificationAndroidRows는 mirror용 Get-RemoteFiles의 예약 prune를
+그대로 사용해 보호 ROM이 분류 입력에서 빠졌고, 실기기 summary가 0으로 표시됐다.
+준비 단계는 -IncludeLocalOnly로 단일 read-only 파일 inventory를 받아
+일반 ROM과 local-only ROM을 같은 classifier에 전달한다.
+local-only는 파일 경로만 분류하며 bytes pull/hash 또는 mutation 대상으로 사용하지 않는다.
+Get-RemoteFiles와 mirror/delete의 예약 prune는 그대로 유지한다.
+정상 ROM의 후속 concurrent inventory 검증도 기존 prune된 목록으로 유지한다.
+summary 함수는 분류 결과만 집계하며 별도 filesystem/ADB scan을 하지 않는다.
+
+UnmanagedMoveCount는 이번 실행에서 새로 이동한 수이며,
+LocalOnlyCount는 시작 시 이미 보호 대상이었던 수이다.
+이동 후 같은 ROM을 다시 summary 입력에 넣어 이중 집계하지 않는다.
+예: 기존 LOCAL_ONLY 2 + 신규 이동 1 → 이동 1 / 로컬 전용 2.
+사후 실제 local-only 파일이 3개인 것과 이번 완료 요약의 시작 집계는 구분한다.
+실기기 기록의 GB40+LOCAL_ONLY2 / GBC57+LOCAL_ONLY0은 97/0/2/0으로 표시한다.
+canonical fields와 GUI formatter/layout은 변경하지 않는다.

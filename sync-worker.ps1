@@ -1052,6 +1052,8 @@ function Write-RomClassificationNotice($Entry) {
 }
 
 function Get-RomReviewSummary([object[]]$Entries) {
+    # 시작 시 Supported 분류 결과만 집계한다. 이동 후 재분류로 중복 집계하지 않는다.
+    $Entries=@($Entries|Where-Object {(Get-RomClassificationCapability $_.System).Status-ceq'Supported'})
     # UI-independent proposal. Do not change GUI/status contracts in this stage.
     $items=@($Entries|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS')}|ForEach-Object {Get-RomClassificationNotice $_})
     $reasons=@($items|Group-Object Classification,Reason|ForEach-Object {[pscustomobject]@{ReasonCode=$_.Group[0].Classification;Reason=$_.Group[0].Reason;Count=$_.Count}})
@@ -1137,9 +1139,33 @@ function Test-LocalOnlySystemPresence([string]$Root) {
     return $r.StdOut-ceq'PRESENT'
 }
 
-function Get-ClassificationAndroidRows($Job,[string]$Session) {
+function Get-ClassificationAndroidRows($Job,[string]$Session,[switch]$IncludeLocalOnly) {
     Assert-ClassificationRemoteLinks $Job.RemotePath
-    foreach($relative in @(Get-RemoteFiles $Job.RemotePath)){
+    $paths=@()
+    if($IncludeLocalOnly){
+        # 준비 단계의 단일 read-only 분류 inventory만 완전하게 수집한다.
+        # mirror/delete용 Get-RemoteFiles의 예약 prune 계약은 변경하지 않는다.
+        if((Get-RomClassificationCapability $Job.System).Status-cne'Supported' -or $Job.RemotePath-cne('/storage/emulated/0/ROMs/'+$Job.System)){throw 'classification inventory scope'}
+        $q=Quote-Sh $Job.RemotePath
+        $parent=Quote-Sh ($Job.RemotePath.Substring(0,$Job.RemotePath.LastIndexOf('/')))
+        $cmd='if [ -L '+$q+' ]; then exit 1; elif [ -d '+$q+' ]; then find '+$q+' -type f -print0; elif [ -e '+$q+' ]; then exit 1; else ls -d '+$parent+' >/dev/null || exit 1; fi'
+        $r=Invoke-Adb -s $Serial shell $cmd
+        if($r.Code-ne0 -or $r.StdErr -or ($r.StdOut -and -not$r.StdOut.EndsWith([string][char]0))){throw 'classification inventory read/format failure'}
+        $prefix=$Job.RemotePath+'/'
+        foreach($path in @($r.StdOut-split'\x00'|Where-Object {$_})){
+            if(-not$path.StartsWith($prefix,[StringComparison]::Ordinal)){throw 'classification inventory outside system'}
+            $paths+=$path.Substring($prefix.Length)
+        }
+        # 기존 일반 ROM 순서를 유지한다. 보호 항목은 mutation 계획에 사용하지 않는다.
+        $paths=@($paths|Where-Object {-not(Is-LocalOnlyRelativePath $_)})+@($paths|Where-Object {Is-LocalOnlyRelativePath $_})
+    }else{$paths=@(Get-RemoteFiles $Job.RemotePath)}
+    foreach($relative in $paths){
+        if(Is-LocalOnlyRelativePath $relative){
+            # 파일 수만 분류한다. 보호 ROM은 pull/hash/전송/삭제하지 않는다.
+            if((Get-EsdeGamePathInfo $relative).Class-ceq'Invalid' -or [IO.Path]::GetExtension($relative).ToLowerInvariant()-cnotin(Get-ClassificationExtensions $Job.System)){continue}
+            [pscustomobject]@{RelativePath=$relative;Sha256=$null}
+            continue
+        }
         # 기존 ES-DE sidecar는 ROM이 아님. 나머지 미확정 파일은 이동/삭제 대신 차단.
         if(Is-ClassificationAuxiliaryPath $relative){Write-Log ('ROM PRESERVE AUXILIARY: '+$Job.System+'/'+$relative);continue}
         $relative=Get-ClassificationRelativePath $Job.System $relative $selectedSystems
@@ -1148,7 +1174,6 @@ function Get-ClassificationAndroidRows($Job,[string]$Session) {
         [pscustomobject]@{RelativePath=$relative;Sha256=$read.Sha256}
     }
 }
-
 function New-ClassificationContext([string]$StateRoot,[string]$Source,[string]$Device) {
     $root=[IO.Path]::GetFullPath($Source).TrimEnd('\')
     $identity=Get-MediaTextHash ($root.ToLowerInvariant()+'|'+$Device)
@@ -1164,9 +1189,9 @@ function New-ClassificationContext([string]$StateRoot,[string]$Source,[string]$D
 
 function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session) {
     $source=@(Get-ClassificationSourceRows $RomJob)
-    $android=@(Get-ClassificationAndroidRows $RomJob $Session)
+    $android=@(Get-ClassificationAndroidRows $RomJob $Session -IncludeLocalOnly)
     $destinations=@()
-    foreach($row in $android){
+    foreach($row in @($android|Where-Object {-not(Is-LocalOnlyRelativePath $_.RelativePath)})){
         $destination=Read-ClassificationRom ($RomJob.RemotePath+'/_UNREGISTERED/'+$row.RelativePath) $Session
         if($destination){$destinations+=[pscustomobject]@{RelativePath=('_UNREGISTERED/'+$row.RelativePath);Sha256=$destination.Sha256}}
     }
