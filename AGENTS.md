@@ -6,7 +6,7 @@
 
 ## 구성과 실행 환경
 
-현재 개발 기준은 **v1.5.0 Stage 2 개발** (stable 기준 v1.4.9)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
+현재 개발 기준은 **v1.5.0 Stage 3 개발** (stable 기준 v1.4.9)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
 
 - `ESDE-Sync.ps1`: Windows Forms GUI, ADB 및 worker 실행.
 - `sync-worker.ps1`: ROM mirror, foreground 검사, gamelist 병합, media ownership의 runtime 원본.
@@ -48,16 +48,15 @@ App 교체와 rollback은 State/config.json/platform-tools를 보존한다. GUI/
 
 실기기 시험은 승인된 격리 범위와 백업·전후 SHA를 사용한다. 실제 사용자 라이브러리에 파괴적 시험을 하지 않으며 예상 밖 결과에는 중단하고 증거를 보존한다. Phase A/B의 Retroid 검증은 통과했지만 다른 vendor 검증과 실제 앱 내 v1.4.8→v1.4.9 업데이트는 별도 확인 사항이다. 승인 없이 commit/push/main 병합/tag/Release/설치를 수행하지 않는다.
 
-## v1.5.0 Stage 1 경계
-docs/v150-stage1-design.md를 참조한다. adoption은 순수 경로/hash 계획·metadata proposal·삭제 gate까지만 구현하며 실제 I/O에 연결하지 않는다.
-_TEST는 inbox가 아니다. 기존 _UNREGISTERED mirror 제외를 약화시키지 않는다.
-game-level altemulator의 staging 변환과 top-level alternativeEmulator를 구분한다. 미확정 mapping/공유 preference 정책은 차단한다.
-GUI layout은 Get-EsdeGuiLayout이 단일 원본이며 96 DPI Dpi autoscale와 100%/125% 검증을 유지한다.
-실제 Android/Dropbox adoption, 설치, commit/push/main/tag/Release 변경은 사용자 승인 전 수행하지 않는다.
-## v1.5.0 Stage 2 현재 경계
-Stage 1 섹션은 checkpoint 당시 범위이다. 현재 연결은 docs/v150-stage2-executor.md를 참조한다.
-일반 unmanaged ROM은 실제 목록 기반 보존 wrapper로 관리 ROM과 분리한다. 기존 mirror/공통 삭제 본문은 유지한다.
-adoption은 _UNREGISTERED inbox만 처리하며 journal/충돌/공유 정책 gate가 통과해야 실행한다.
-Android system-level alternativeEmulator 전체 subtree를 보존하고 game-level 변환은 staging에만 적용한다.
-실패한 adoption은 새 canonical/XML을 자동 rollback하지 않는다. cleanup 실패 보상은 삭제된 inbox 복사본에만 한정한다.
-미완료/손상 journal은 수동 검토 전 새 mutation을 차단한다. 실제 Android/Dropbox adoption은 이번 Stage에서 실행하지 않는다.
+## v1.5.0 최종 local-only 정책
+현재 설계는 docs/v150-local-only-classification.md이다. docs/history는 폐기된 checkpoint 기록이다.
+Dropbox는 관리 SOURCE이며 이 기능에서 쓰지 않는다. 관리 ROM list도 source에 만들지 않는다.
+_TEST는 manual-only, _UNREGISTERED는 일반 Android 비관리 ROM의 자동 분류 목적지이다.
+이후 두 영역은 동일하게 scan/mirror/delete/overwrite 제외 및 gamelist whole-node 보존을 적용한다.
+동일 경로 SHA conflict는 ROM을 보존하고 warning을 기록하며 managed XML/media 정책을 유지한다.
+다른 경로 같은 SHA는 검증된 save/state/media mapping이 없으면 REVIEW, 다중 SHA 후보는 AMBIGUOUS이다. canonical ROM 중복 전송/ROM-only rename/중복 node 자동 정리는 금지한다.
+전체 계획 검증 후 Android 내부 mv/SHA → gamelist verified transfer → inventory refresh → managed mirror 순서이다.
+실패는 최소 classification state를 보존하고 후속 mutation을 차단한다. 자동 reverse move/resume 없음.
+local-only가 있는 system의 media는 flat naming 정책 확인 전 전체 job을 보류하고 파일/metadata를 유지한다.
+Managed runtime3/alternativeEmulator subtree/GB·GBC staging mapping과 기존 안전장치를 유지한다.
+실제 데이터/이전 시험 자료 변경, commit/push/main/tag/Release/설치는 별도 승인 없이 하지 않는다.

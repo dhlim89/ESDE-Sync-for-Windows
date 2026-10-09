@@ -360,7 +360,8 @@ function Start-Esde {
     }
 }
 
-$ReservedFolders = @('_TEST', '_UNREGISTERED')
+$LocalOnlyFolders = @('_TEST', '_UNREGISTERED')
+$ReservedFolders = $LocalOnlyFolders
 
 function Assert-RemotePath([string]$RemotePath, [switch]$Deleting, [switch]$Tree) {
     if ([string]::IsNullOrWhiteSpace($RemotePath) -or
@@ -838,101 +839,6 @@ function Convert-EsdeAndroidAltemulators($Gamelist,[string]$System,[Parameter(Ma
     return $result
 }
 
-function Get-UnregisteredAdoptionPath([string]$System,[string]$RelativePath,[string[]]$SelectedSystems) {
-    if($System-notmatch'^[a-zA-Z0-9_-]+$' -or $SelectedSystems-cnotcontains$System){throw 'adoption 선택 시스템 밖'}
-    if($System-match'^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$' -or $System-in@('_TEST','_UNREGISTERED')){throw 'adoption 시스템 이름 안전 오류'}
-    if(-not$RelativePath -or $RelativePath-match'^[\\/]|:|[\x00-\x1f\x7f]'){throw 'adoption 상대 경로 오류'}
-    $relative=$RelativePath.Replace('\','/')
-    if($relative.StartsWith('./')){$relative=$relative.Substring(2)}
-    $parts=@($relative-split'/')
-    if($parts.Count-lt2 -or $parts[0]-ine'_UNREGISTERED'){throw '_UNREGISTERED inbox만 채택 가능'}
-    foreach($part in $parts){
-        if($part-in@('','.','..') -or $part-match'[<>:"|?*]|[ .]$' -or $part-match'^(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)'){throw 'adoption Windows/path 안전 규칙 위반'}
-    }
-    $destination=$parts[1..($parts.Count-1)]-join'/'
-    if(@($parts[1..($parts.Count-1)]|Where-Object {$_-ieq'_TEST' -or $_-ieq'_UNREGISTERED'}).Count){throw '중첩 예약 경로 채택 금지'}
-    return [pscustomobject]@{System=$System;InboxPath='./'+$relative;ManagedPath='./'+$destination;DestinationRelativePath=$destination}
-}
-
-function New-UnregisteredAdoptionPlan([object[]]$Candidates,[object[]]$Destinations,[string[]]$SelectedSystems,[hashtable]$RomExtensions=@{gb=@('.gb','.gbc','.dmg','.gbx','.bs','.cgb','.sgb','.sfc','.smc','.zip','.7z');gbc=@('.gb','.gbc','.dmg','.gbx','.bs','.cgb','.sgb','.sfc','.smc','.zip','.7z')}) {
-    # 전달된 hash snapshot만 검증한다. ROM 읽기/쓰기/pull/delete는 수행하지 않는다.
-    $destinationMap=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($destination in $Destinations){
-        $info=Get-UnregisteredAdoptionPath $destination.System ('_UNREGISTERED/'+$destination.RelativePath) $SelectedSystems
-        $key=$info.System+'/'+$info.DestinationRelativePath
-        if($destination.Sha256-notmatch'^[a-fA-F0-9]{64}$' -or $destinationMap.ContainsKey($key)){throw 'Dropbox snapshot hash/중복 오류'}
-        $destinationMap.Add($key,$destination)
-    }
-    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $plan=New-Object 'Collections.Generic.List[object]'
-    foreach($candidate in $Candidates){
-        $info=Get-UnregisteredAdoptionPath $candidate.System $candidate.RelativePath $SelectedSystems
-        if(-not$RomExtensions.ContainsKey($candidate.System) -or $RomExtensions[$candidate.System]-notcontains[IO.Path]::GetExtension($info.DestinationRelativePath)){throw '확인된 ES-DE ROM extension 밖'}
-        $key=$info.System+'/'+$info.DestinationRelativePath
-        if(-not$seen.Add($key)){throw 'adoption 목적지 대소문자 충돌'}
-        if($candidate.AndroidSha256-notmatch'^[a-fA-F0-9]{64}$' -or $candidate.StagedSha256-notmatch'^[a-fA-F0-9]{64}$' -or $candidate.AndroidSha256-ine$candidate.StagedSha256){throw 'adoption pull/hash 검증 실패'}
-        $action='InstallNew';$canonical=$info.DestinationRelativePath
-        if($destinationMap.ContainsKey($key)){
-            if($destinationMap[$key].Sha256-ine$candidate.StagedSha256){throw ('adoption 목적지 SHA 충돌: '+$key)}
-            $action='ReuseIdentical'
-            # Windows 동일 경로의 기존 실제 표기를 사용해 Android case-sensitive ROM/path를 맞춘다.
-            $canonical=$destinationMap[$key].RelativePath.Replace('\','/')
-        }
-        $plan.Add([pscustomobject]@{System=$info.System;InboxPath=$info.InboxPath;ManagedPath='./'+$canonical;DestinationRelativePath=$canonical;Sha256=$candidate.StagedSha256.ToLowerInvariant();Action=$action;RemoveAndroidSource=$false})
-    }
-    return @($plan.ToArray())
-}
-
-function New-AdoptionGamePromotion([System.Xml.XmlElement]$AndroidInbox,[string]$ManagedPath,[System.Xml.XmlElement]$DropboxManaged,[System.Xml.XmlElement]$AndroidManaged) {
-    # 순수 node proposal. ROM 성공/journal 검증 및 파일 교체는 이 함수 밖의 Stage 2 책임.
-    $target=Get-EsdeGamePathInfo $ManagedPath
-    if($target.Class-ne'Managed'){throw 'adoption 승격 target은 managed path여야 함'}
-    if($AndroidInbox){
-        $old=Get-EsdeGamePathInfo $AndroidInbox.SelectSingleNode('path').InnerText
-        if($old.Class-ne'LocalUnregistered'){throw 'adoption metadata는 _UNREGISTERED만'}
-        $prefix='./_UNREGISTERED/'
-        if(-not$old.Key.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or -not[string]::Equals($target.Key,('./'+$old.Key.Substring($prefix.Length)),[StringComparison]::OrdinalIgnoreCase)){throw 'inbox/정식 path 승격 관계 불일치'}
-    }
-    if($AndroidManaged -and $AndroidInbox){
-        foreach($tag in @('playcount','lastplayed','playtime')){
-            $a=$AndroidManaged.SelectSingleNode($tag);$b=$AndroidInbox.SelectSingleNode($tag)
-            if(($null-ne$a)-ne($null-ne$b) -or ($a -and $a.InnerText-cne$b.InnerText)){throw 'Android 정식/예약 path runtime 충돌'}
-        }
-    }
-    foreach($node in @($DropboxManaged,$AndroidManaged)|Where-Object {$_}){
-        if((Get-EsdeGamePathInfo $node.SelectSingleNode('path').InnerText).Key-cne$target.Key){throw '정식 game target path 불일치'}
-    }
-    if(-not$AndroidInbox -and -not$DropboxManaged){return [pscustomobject]@{DropboxNode=$null;AndroidNode=$null;NeedsPolicyDecision=$false;CreateGame=$false}}
-    $source=if($DropboxManaged){$DropboxManaged.CloneNode($true)}else{$AndroidInbox.CloneNode($true)}
-    $source.SelectSingleNode('path').InnerText=$target.Key
-    $pending=@(if($AndroidInbox){$AndroidInbox.ChildNodes|Where-Object {$_.NodeType-eq[Xml.XmlNodeType]::Element -and $_.Name-in@('favorite','hidden','kidgame','broken','completed','hidemetadata','altemulator','image','thumbnail','marquee','fanart','video','manual','controller','screen','nomultiscrape','nogamecount','collectionsortname','sortname','platform','emulator','core','androidPackage')}|ForEach-Object Name})
-    if($AndroidInbox){
-        foreach($child in @($AndroidInbox.ChildNodes|Where-Object {$_.NodeType-eq[Xml.XmlNodeType]::Element -and $_.Name-notin@('path','name','desc','playcount','playtime','lastplayed')})){
-            if($child.OuterXml-match'(?i)(/storage/|/home/|[A-Z]:\\)'){$pending+=@($child.Name)}
-        }
-        $pending=@($pending|Sort-Object -Unique)
-    }
-    if(-not$DropboxManaged){
-        # 기기 플레이 기록은 공유 DB의 새 node로 승격시키지 않는다.
-        foreach($tag in @('playcount','lastplayed','playtime')){foreach($node in @($source.SelectNodes($tag))){[void]$source.RemoveChild($node)}}
-        # 공유 여부가 미확정인 preference/platform/media field가 있으면 실제 commit을 차단해야 한다.
-
-    }
-    $android=if($DropboxManaged){$source.CloneNode($true)}else{$AndroidInbox.CloneNode($true)}
-    $android.SelectSingleNode('path').InnerText=$target.Key
-    if($AndroidInbox){[void](Merge-EsdeRuntimeGameTags $android $AndroidInbox)}
-    return [pscustomobject]@{DropboxNode=$source;AndroidNode=$android;NeedsPolicyDecision=($pending.Count-gt0);PendingFields=$pending;CreateGame=$true}
-}
-
-function Get-AdoptionSourceRemovalDecision([string]$State,[bool]$DropboxRomVerified,[bool]$DropboxGamelistVerified,[bool]$AndroidGamelistVerified,[bool]$SourceUnchanged,[bool]$AndroidManagedRomVerified=$false,[bool]$PolicyResolved=$false) {
-    return ($State-ceq'android-gamelist-installed' -and $DropboxRomVerified -and $DropboxGamelistVerified -and $AndroidGamelistVerified -and $SourceUnchanged -and $AndroidManagedRomVerified -and $PolicyResolved)
-}
-
-function Get-AdoptionResumeDisposition([string]$State) {
-    if($State-ceq'completed'){return 'VerifyCompleted'}
-    if($State-in@('discovered','staged','source-verified','dropbox-installed','gamelist-prepared','dropbox-gamelist-installed','android-rom-installed','android-gamelist-installed','android-source-removed','failed')){return 'BlockedManualReview'}
-    throw '알 수 없는 adoption journal state'
-}
 
 function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$PreservedUnmanagedPaths=@()) {
     $warnings=New-Object 'Collections.Generic.List[string]'
@@ -982,7 +888,7 @@ function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$Preser
     $localKeys=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach($entry in $localEntries){
         if(-not$localKeys.Add($entry.Key)){& $emit ('Android local-only 중복 path, 첫 항목 보존: '+$entry.Key);continue}
-        if($entry.Class-eq'Managed' -and $keys.ContainsKey($entry.Key)){throw 'unmanaged/master path 분류 충돌'}
+
         $imported=$result.Document.ImportNode($entry.Node,$true)
         if($keys.ContainsKey($entry.Key)){
             & $emit ('local-only 충돌: Android 우선 '+$entry.Key)
@@ -1000,463 +906,354 @@ function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$Preser
     return $result
 }
 
-function New-RomPreservationContext([string]$StateRoot,[string]$LibraryRoot,[string]$DeviceSerial) {
-    $root=[IO.Path]::GetFullPath($LibraryRoot).TrimEnd('\')
-    $identity=Get-MediaTextHash ($root.ToLowerInvariant()+'|'+$DeviceSerial)
-    $file=Join-Path (Join-Path $StateRoot 'managed-rom-paths') ($identity+'.json')
-    [void](Assert-MediaDiskPath $file $StateRoot)
-    $record=[pscustomobject]@{schemaVersion=1;identity=$identity;entries=@()}
-    if([IO.File]::Exists($file)){
-        $record=Get-Content -LiteralPath $file -Raw|ConvertFrom-Json
-        if($record.schemaVersion-ne1 -or $record.identity-cne$identity -or $record.entries-isnot[Array]){throw 'ROM preservation State 불일치'}
-        $keys=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-        foreach($entry in $record.entries){
-            [void](Get-MediaRelativePath $entry.relativePath)
-            if($entry.system-notmatch'^[a-zA-Z0-9_-]+$' -or (Is-ExcludedRelativePath $entry.relativePath)){throw 'ROM preservation path 오류'}
-            if(-not$keys.Add($entry.system+'/'+$entry.relativePath)){throw 'ROM preservation 중복 key'}
-        }
+
+function Is-LocalOnlyRelativePath([string]$Path) { return (Is-ExcludedRelativePath $Path) }
+
+function Get-ClassificationRelativePath([string]$System,[string]$Path,[string[]]$Systems) {
+    if($System-cnotin$Systems -or $System-cnotmatch'^[a-zA-Z0-9_-]+$' -or $System-in@('_TEST','_UNREGISTERED')){throw 'CLASSIFICATION BLOCK: system scope'}
+    $info=Get-EsdeGamePathInfo $Path
+    if($info.Class-ne'Managed'){throw 'CLASSIFICATION BLOCK: normal relative path required'}
+    $relative=$info.Key.Substring(2)
+    foreach($part in $relative.Split('/')){
+        if($part-match'[<>:"|?*]' -or $part-match'[. ]$' -or $part-match'^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)'){throw 'CLASSIFICATION BLOCK: invalid/reserved segment'}
     }
-    return [pscustomobject]@{File=$file;StateRoot=$StateRoot;Record=$record}
-}
-function Prepare-RomPreservationPlan($Job,$Context) {
-    $source=@(Get-ManagedLocalItems $Job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer}|ForEach-Object {$_.FullName.Substring($Job.LocalPath.Length).TrimStart('\','/').Replace('\','/')})
-    $known=@($Context.Record.entries|Where-Object system -CEQ $Job.System|ForEach-Object relativePath)
-    $managed=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($p in @($source+$known)){[void]$managed.Add($p)}
-    $remote=@(Get-RemoteFiles $Job.RemotePath)
-    $unmanaged=@($remote|Where-Object {-not$managed.Contains($_)})
-    $managedDirs=@($source+$known|ForEach-Object {
-        $parts=$_.Split('/')
-        for($i=1;$i-lt$parts.Length;$i++){($parts[0..($i-1)]-join'/')}
-    }|Sort-Object -Unique)
-    return [pscustomobject]@{System=$Job.System;RemotePath=$Job.RemotePath;Managed=$managed;ManagedDirs=$managedDirs;Unmanaged=$unmanaged;Source=$source}
-}
-function Sync-PreservedRomSystem($Job,$Plan,$Context,[string]$Label) {
-    if($Job.System-cne$Plan.System -or $Job.RemotePath-cne$Plan.RemotePath){throw 'ROM preservation 범위 오류'}
-    $files=(Get-Item Function:Get-RemoteFiles).ScriptBlock;$dirs=(Get-Item Function:Get-RemoteDirs).ScriptBlock
-    $allowed=$Plan.Managed;$allowedDirs=$Plan.ManagedDirs;$root=$Plan.RemotePath
-    $fileFilter={param($path)if($path-cne$root){throw 'ROM remote scope mismatch'}; & $files $path|Where-Object {$allowed.Contains($_)}}.GetNewClosure()
-    $dirFilter={param($path)if($path-cne$root){throw 'ROM remote scope mismatch'}; & $dirs $path|Where-Object {$allowedDirs-ccontains$_}}.GetNewClosure()
-    Set-Item -Path Function:local:Get-RemoteFiles -Value $fileFilter
-    Set-Item -Path Function:local:Get-RemoteDirs -Value $dirFilter
-    Mirror-SystemFolder $Job.LocalPath $Job.RemotePath $Label
-    $other=@($Context.Record.entries|Where-Object system -CNE $Job.System)
-    $current=@(Get-ManagedLocalItems $Job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer}|ForEach-Object {
-        [pscustomobject]@{system=$Job.System;relativePath=$_.FullName.Substring($Job.LocalPath.Length).TrimStart('\','/').Replace('\','/')}
-    })
-    $Context.Record.entries=@($other+$current)
-    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Context.File))
-    Write-MediaJson $Context.File $Context.Record $Context.StateRoot
-}
-function Initialize-AdoptionAccessCheck {
-    if('EsdeAdoptionAccess'-as[type]){return}
-    Add-Type -TypeDefinition @"
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using System.Security.Principal;
-public static class EsdeAdoptionAccess {
- [StructLayout(LayoutKind.Sequential)] public struct Mapping { public uint Read,Write,Execute,All; }
- [DllImport("advapi32.dll",SetLastError=true)] static extern bool DuplicateToken(IntPtr token,int level,out IntPtr copy);
- [DllImport("advapi32.dll",SetLastError=true)] static extern bool AccessCheck(byte[] sd,IntPtr token,uint desired,ref Mapping mapping,IntPtr privileges,ref uint size,out uint granted,out bool allowed);
- [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
- public static bool Check(byte[] sd,uint desired) {
-  using(var identity=WindowsIdentity.GetCurrent()) {
-   IntPtr token; if(!DuplicateToken(identity.Token,2,out token))throw new Win32Exception(Marshal.GetLastWin32Error());
-   try {
-    var mapping=new Mapping{Read=0x120089,Write=0x120116,Execute=0x1200A0,All=0x1F01FF};
-    uint size=1024,granted;bool allowed;IntPtr buffer=Marshal.AllocHGlobal((int)size);
-    try {
-     if(!AccessCheck(sd,token,desired,ref mapping,buffer,ref size,out granted,out allowed))throw new Win32Exception(Marshal.GetLastWin32Error());
-     return allowed;
-    } finally {Marshal.FreeHGlobal(buffer);}
-   } finally {CloseHandle(token);}
-  }
- }
-}
-"@
+    return $relative
 }
 
-function Test-AdoptionSecurityAccess([byte[]]$Descriptor,[uint32]$Mask) {
-    try{
-        Initialize-AdoptionAccessCheck
-        $raw=New-Object Security.AccessControl.RawSecurityDescriptor($Descriptor,0)
-        # 지원 범위를 명시적으로 제한. callback/object ACE, 비canonical DACL은 UNKNOWN.
-        $acl=New-Object Security.AccessControl.FileSecurity
-        $acl.SetSecurityDescriptorBinaryForm($Descriptor)
-        if(-not$raw.Owner -or -not$raw.Group -or -not$acl.AreAccessRulesCanonical){throw 'unsupported/noncanonical security descriptor'}
-        foreach($ace in $raw.DiscretionaryAcl){
-            if($ace-isnot[Security.AccessControl.CommonAce] -or $ace.IsCallback -or $ace.AceQualifier-notin@('AccessAllowed','AccessDenied')){throw 'unsupported ACE'}
-        }
-        $allowed=[EsdeAdoptionAccess]::Check($Descriptor,$Mask)
-        $blocking=@()
-        if(-not$allowed){
-            $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-            try{
-                $sids=@($identity.User.Value)+@($identity.Groups|ForEach-Object Value)
-                foreach($ace in $raw.DiscretionaryAcl){
-                    if($ace.AceQualifier-eq'AccessDenied' -and -not(([int]$ace.AceFlags)-band[int][Security.AccessControl.AceFlags]::InheritOnly) -and ($ace.AccessMask-band$Mask) -and $sids-contains$ace.SecurityIdentifier.Value){
-                        $blocking+=[pscustomobject]@{Sid=$ace.SecurityIdentifier.Value;Mask=('0x{0:X}'-f$ace.AccessMask);Inherited=[bool](([int]$ace.AceFlags)-band[int][Security.AccessControl.AceFlags]::Inherited)}
-                    }
-                }
-            }finally{$identity.Dispose()}
-        }
-        return [pscustomobject]@{Result=$(if($allowed){'Allowed'}else{'Denied'});Mask=$Mask;BlockingAce=$blocking;Reason='Windows AccessCheck';Allowed=$allowed}
-    }catch{return [pscustomobject]@{Result='Unknown';Mask=$Mask;BlockingAce=@();Reason=$_.Exception.Message;Allowed=$false}}
+function Get-ClassificationExtensions([string]$System) {
+    # Stage 1의 실제 ES-DE GB/GBC 정의에서 확인된 extension만.
+    if($System-cnotin@('gb','gbc')){throw 'CLASSIFICATION BLOCK: ROM extension policy unresolved'}
+    return @('.gb','.gbc','.dmg','.gbx','.bs','.cgb','.sgb','.sfc','.smc','.zip','.7z')
 }
 
-function Get-AdoptionInheritedDescriptor([byte[]]$Descriptor,[bool]$Directory) {
-    $raw=New-Object Security.AccessControl.RawSecurityDescriptor($Descriptor,0)
-    $acl=New-Object Security.AccessControl.RawAcl(2,0)
-    foreach($ace in $raw.DiscretionaryAcl){
-        if($ace-isnot[Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'unsupported inherited ACE'}
-        if($Directory -and (([int]$ace.AceFlags)-band1) -and -not(([int]$ace.AceFlags)-band2)){throw 'object-only directory pass-through inheritance unsupported'}
-        $flag=if($Directory){[Security.AccessControl.AceFlags]::ContainerInherit}else{[Security.AccessControl.AceFlags]::ObjectInherit}
-        if(-not(([int]$ace.AceFlags)-band([int]$flag))){continue}
-        $sid=$ace.SecurityIdentifier
-        if($sid.Value-ceq'S-1-3-1'){throw 'creator-group inheritance prediction unsupported'}
-        if($sid.Value-ceq'S-1-3-0'){$ownerIdentity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$sid=$ownerIdentity.User}finally{$ownerIdentity.Dispose()}}
-        $flags=[Security.AccessControl.AceFlags]::Inherited
-        if($Directory -and -not(([int]$ace.AceFlags)-band[int][Security.AccessControl.AceFlags]::NoPropagateInherit)){
-            $flags=[Security.AccessControl.AceFlags](([int]$flags)-bor(([int]$ace.AceFlags)-band(1-bor2)))
-        }
-        $copy=New-Object Security.AccessControl.CommonAce($flags,$ace.AceQualifier,$ace.AccessMask,$sid,$false,$null)
-        $acl.InsertAce($acl.Count,$copy)
-    }
-    $id=[Security.Principal.WindowsIdentity]::GetCurrent()
-    try{$result=New-Object Security.AccessControl.RawSecurityDescriptor([Security.AccessControl.ControlFlags]::DiscretionaryAclPresent,$id.User,$raw.Group,$null,$acl)}
-    finally{$id.Dispose()}
-    $bytes=New-Object byte[] $result.BinaryLength;$result.GetBinaryForm($bytes,0);return ,$bytes
+function Is-ClassificationAuxiliaryPath([string]$Path) {
+    # These are data/sidecars, never ROM classification or automatic relocation sources.
+    return ($Path-cin@('metadata.txt','systeminfo.txt') -or [IO.Path]::GetExtension($Path).ToLowerInvariant()-cin@('.sav','.srm','.rtc') -or $Path-match'(?i)\.state(?:[0-9]+|\.auto)?$')
 }
 
-function Get-AdoptionDiskDescriptor([string]$Path,[bool]$Directory=$false) {
-    $full=[IO.Path]::GetFullPath($Path)
-    if(Test-Path -LiteralPath $full){
-        $item=Get-Item -LiteralPath $full -Force
-        if($Directory-ne[bool]$item.PSIsContainer){throw 'capability object type mismatch'}
-        return ,(Get-Acl -LiteralPath $full).GetSecurityDescriptorBinaryForm()
-    }
-    $parent=Split-Path -Parent $full
-    if(-not$parent -or $parent-ceq$full){throw 'capability parent unknown'}
-    $parentDescriptor=Get-AdoptionDiskDescriptor $parent $true
-    return ,(Get-AdoptionInheritedDescriptor $parentDescriptor $Directory)
-}
-
-function Get-AdoptionRequiredCapabilities($Plan) {
-    foreach($entry in $Plan.Entries){
-        if(-not$entry.DestinationHash){[pscustomobject]@{Path=$entry.DropboxPath;Kind='CreateRom';RequiresWrite=$true}}
-        else{[pscustomobject]@{Path=$entry.DropboxPath;Kind='ReadRom';RequiresWrite=$false}}
-    }
-    foreach($system in $Plan.Systems){
-        if($system.SharedOutput){[pscustomobject]@{Path=$system.DropboxGamelist;Kind=$(if($system.DropboxHash){'ReplaceXml'}else{'CreateXml'});RequiresWrite=$true}}
-    }
-}
-
-function Test-AdoptionDestinationCapability([string]$Path,[string]$Kind) {
-    $checks=@();$required=@();$missing=@();$unknown=$false
-    try{
-        if($Kind-ceq'ReadRom'){
-            $r=Test-AdoptionSecurityAccess (Get-AdoptionDiskDescriptor $Path $false) 0x120089
-            return [pscustomobject]@{Path=$Path;Kind=$Kind;Result=$r.Result;CanReadFile=($r.Result-eq'Allowed');CanCreateFile=$null;CanWriteExistingFile=$null;CanDeleteFile=$null;CanDeleteChild=$null;CanCreateDirectory=$null;CanRenameOrReplace=$null;RequiredCapabilities=@('CanReadFile');MissingCapabilities=@(if($r.Result-ne'Allowed'){'CanReadFile'});BlockingAce=$r.BlockingAce;Reason=$r.Reason;VolumeStatus='NotRequired';FreeSpaceStatus='NotRequired'}
-        }
-        $parent=Split-Path -Parent $Path
-        $parentSd=Get-AdoptionDiskDescriptor $parent $true
-        $fileSd=Get-AdoptionDiskDescriptor $Path $false
-        $stagingSd=Get-AdoptionInheritedDescriptor $parentSd $false
-        $masks=[ordered]@{CanCreateFile=@($parentSd,2);CanWriteExistingFile=@($fileSd,0x120116);CanDeleteFile=@($fileSd,65536);CanDeleteChild=@($parentSd,64);CanCreateDirectory=@($parentSd,4);CanReadFile=@($fileSd,0x120089);CanWriteStagingFile=@($stagingSd,0x12019F);CanDeleteStagingFile=@($stagingSd,65536)}
-        $values=@{}
-        foreach($name in $masks.Keys){
-            $r=Test-AdoptionSecurityAccess $masks[$name][0] $masks[$name][1]
-            $values[$name]=($r.Result-eq'Allowed');$checks+=[pscustomobject]@{Capability=$name;Result=$r.Result;BlockingAce=$r.BlockingAce;Reason=$r.Reason}
-        }
-        if($Kind-ceq'ReadRom'){$required=@('CanReadFile')}
-        else{
-            $required=@('CanCreateFile','CanReadFile','CanWriteExistingFile','CanWriteStagingFile')
-            # staging 파일 삭제/rename에는 파일 DELETE 또는 parent DELETE_CHILD 중 하나.
-            $values.CanRenameOrReplace=(($values.CanDeleteStagingFile-or$values.CanDeleteChild) -and ($Kind-cne'ReplaceXml' -or $values.CanDeleteFile-or$values.CanDeleteChild))
-            $checks+=[pscustomobject]@{Capability='CanRenameOrReplace';Result=$(if($values.CanRenameOrReplace){'Allowed'}elseif(@($checks|Where-Object {$_.Capability-in@('CanDeleteFile','CanDeleteChild','CanDeleteStagingFile') -and $_.Result-eq'Unknown'}).Count){'Unknown'}else{'Denied'});BlockingAce=@($checks|Where-Object Capability -IN @('CanDeleteFile','CanDeleteChild','CanDeleteStagingFile')|ForEach-Object BlockingAce);Reason='DELETE or DELETE_CHILD'}
-            $required+=@('CanRenameOrReplace')
-            if(-not(Test-Path -LiteralPath $parent)){
-                # 없는 directory chain의 각 기존/예측 parent에 mkdir 권한 필요.
-                $cursor=$parent
-                while(-not(Test-Path -LiteralPath $cursor)){
-                    $p=Split-Path -Parent $cursor
-                    $r=Test-AdoptionSecurityAccess (Get-AdoptionDiskDescriptor $p $true) 4
-                    $name='CreateDirectory:'+ $cursor;$required+=@($name)
-                    $checks+=[pscustomobject]@{Capability=$name;Result=$r.Result;BlockingAce=$r.BlockingAce;Reason=$r.Reason}
-                    $cursor=$p
-                }
-            }
-            if($Kind-ceq'ReplaceXml'){
-                # 현재 목적지와 새 staging이 모두 write/read 가능한지 확인.
-                $required+=@('CanWriteExistingFile')
-            }
-        }
-        foreach($name in $required){
-            $r=@($checks|Where-Object Capability -CEQ $name)[0]
-            if($r.Result-ne'Allowed'){$missing+=@($name);if($r.Result-eq'Unknown'){$unknown=$true}}
-        }
-        $result=if($unknown){'Unknown'}elseif($missing.Count){'Denied'}else{'Allowed'}
-        return [pscustomobject]@{Path=$Path;Kind=$Kind;Result=$result;CanCreateFile=$values.CanCreateFile;CanWriteExistingFile=$values.CanWriteExistingFile;CanDeleteFile=$values.CanDeleteFile;CanDeleteChild=$values.CanDeleteChild;CanCreateDirectory=$values.CanCreateDirectory;CanRenameOrReplace=$values.CanRenameOrReplace;RequiredCapabilities=$required;MissingCapabilities=$missing;BlockingAce=@($checks|Where-Object {$missing-contains$_.Capability}|ForEach-Object BlockingAce);Checks=$checks;VolumeStatus='NotChecked';FreeSpaceStatus='NotChecked';SameVolumeDesign='DestinationSibling'}
-    }catch{return [pscustomobject]@{Path=$Path;Kind=$Kind;Result='Unknown';RequiredCapabilities=@($Kind);MissingCapabilities=@($Kind);BlockingAce=@();Reason=$_.Exception.Message;VolumeStatus='NotChecked';FreeSpaceStatus='NotChecked'}}
-}
-
-function Test-AdoptionPlanCapability($Plan) {
-    $results=@(Get-AdoptionRequiredCapabilities $Plan|ForEach-Object {Test-AdoptionDestinationCapability $_.Path $_.Kind})
-    $state=if(@($results|Where-Object Result -EQ Unknown).Count){'Unknown'}elseif(@($results|Where-Object Result -EQ Denied).Count){'Denied'}else{'Allowed'}
-    return [pscustomobject]@{Result=$state;Allowed=($state-eq'Allowed');Destinations=$results;RequiredCapabilities=@($results|ForEach-Object RequiredCapabilities);MissingCapabilities=@($results|ForEach-Object MissingCapabilities)}
-}
-
-function Read-AdoptionObservation([string]$Path,[bool]$Remote) {
-    try{
-        if(-not$Remote){
-            if(-not(Test-Path -LiteralPath $Path)){return [pscustomobject]@{State='Absent';Sha256=''}}
-            $item=Get-Item -LiteralPath $Path -Force
-            if($item.PSIsContainer -or ($item.Attributes-band[IO.FileAttributes]::ReparsePoint)){
-                # cloud placeholder 검증은 기존 안전 검사로 수행.
-                Assert-LocalSourcePath $Path $SourceRoot
-                if($item.PSIsContainer){throw 'not a file'}
-            }
-            return [pscustomobject]@{State='Present';Sha256=(Get-FileHash -LiteralPath $Path).Hash.ToLowerInvariant()}
-        }
-        Assert-RemotePath $Path
-        $q=Quote-Sh $Path;$checks=''
-        $checks='cd /storage/emulated/0 || exit 1; '
-        $parts=$Path.Split('/')
-        for($i=4;$i-lt$parts.Length-1;$i++){
-            $parent=Quote-Sh ($parts[0..$i]-join'/')
-            $checks+='if [ -L '+$parent+' ]; then exit 1; elif [ -d '+$parent+' ]; then cd '+$parent+' || exit 1; elif [ -e '+$parent+' ]; then exit 1; else printf ABSENT; exit 0; fi; '
-        }
-        $checks+='[ ! -L '+$q+' ] || exit 1; '
-        $r=Invoke-Adb -s $Serial shell ($checks+'if [ -f '+$q+' ]; then printf PRESENT; elif [ -e '+$q+' ]; then exit 1; else printf ABSENT; fi')
-        if($r.Code-ne0 -or $r.StdErr -or $r.StdOut-cnotin@('PRESENT','ABSENT')){throw 'remote state unknown'}
-        if($r.StdOut-ceq'ABSENT'){return [pscustomobject]@{State='Absent';Sha256=''}}
-        foreach($command in @('sha256sum ','toybox sha256sum ')){
-            $r=Invoke-Adb -s $Serial shell ($command+$q)
-            if($r.Code-eq0 -and -not$r.StdErr -and $r.StdOut.TrimEnd([char]13,[char]10)-match('^([a-fA-F0-9]{64})  '+[regex]::Escape($Path)+'$')){
-                return [pscustomobject]@{State='Present';Sha256=$matches[1].ToLowerInvariant()}
-            }
-        }
-        throw 'read-only remote hash unsupported'
-    }catch{return [pscustomobject]@{State='Unknown';Sha256='';Reason=$_.Exception.Message}}
-}
-
-function Read-AdoptionRemoteResidue([string]$Path,[string]$Suffix='.esde-adoption-*') {
-    try{
-        Assert-RemotePath $Path
-        $parent=$Path.Substring(0,$Path.LastIndexOf('/'));$leaf=$Path.Substring($Path.LastIndexOf('/')+1)
-        $q=Quote-Sh $parent
-        $cmd='if [ -L '+$q+' ]; then exit 1; elif [ -d '+$q+' ]; then cd '+$q+' || exit 1; find '+$q+' -maxdepth 1 -name '+(Quote-Sh ($leaf+$Suffix))+' \( -type f -o -type l \) -print; elif [ -e '+$q+' ]; then exit 1; fi'
-        $r=Invoke-Adb -s $Serial shell $cmd
-        if($r.Code-ne0 -or $r.StdErr){throw 'remote residue lookup failed'}
-        return [pscustomobject]@{State='Known';Paths=@($r.StdOut-split'\r?\n'|Where-Object {$_})}
-    }catch{return [pscustomobject]@{State='Unknown';Paths=@();Reason=$_.Exception.Message}}
-}
-function Assert-AdoptionJournalSchema($Journal,$Context,[string]$FileName) {
-    foreach($name in @('schemaVersion','identity','transactionId','state','completed','entries','history','createdAt','updatedAt')){
-        if($Journal.PSObject.Properties.Name-cnotcontains$name){throw ('journal missing '+$name)}
-    }
-    if($Journal.schemaVersion-ne1 -or $Journal.schemaVersion-isnot[int] -or $Journal.completed-isnot[bool] -or $Journal.identity-cne$Context.Identity -or $Journal.transactionId-cnotmatch'^[a-f0-9]{32}$' -or $FileName-cne($Journal.transactionId+'.json') -or $Journal.entries-isnot[Array] -or @($Journal.entries).Count-eq0 -or $Journal.history-isnot[Array]){throw 'journal schema/identity'}
-    $states=@('staged','source-verified','dropbox-installed','gamelist-prepared','dropbox-gamelist-installed','android-rom-installed','android-gamelist-installed','android-source-removed','completed','failed')
-    if($Journal.state-cnotin$states -or @($Journal.history).Count-eq0 -or $Journal.history[-1].state-cne$Journal.state -or $Journal.completed-ne($Journal.state-ceq'completed')){throw 'journal state/history mismatch'}
-    foreach($stamp in @($Journal.createdAt,$Journal.updatedAt)+@($Journal.history|ForEach-Object at)){
-        $date=[DateTimeOffset]::MinValue;if(-not[DateTimeOffset]::TryParse([string]$stamp,[ref]$date)){throw 'journal timestamp'}
-    }
-    foreach($step in $Journal.history){if($step.state-cnotin$states){throw 'journal history unknown'}}
+function New-UnregisteredClassificationPlan([string]$System,[object[]]$Source,[object[]]$Android,[object[]]$Destinations,[string[]]$Systems) {
+    $index=New-ManagedRomShaIndex $System $Source $Systems
+    $managed=$index.Paths
     $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($entry in $Journal.entries){
-        $prefix='/storage/emulated/0/ROMs/'+$entry.System+'/'
-        if(-not([string]$entry.InboxPath).StartsWith($prefix,[StringComparison]::Ordinal)){throw 'journal inbox scope'}
-        $info=Get-UnregisteredAdoptionPath $entry.System $entry.InboxPath.Substring($prefix.Length) @($entry.System)
-        $disk=Join-Path (Join-Path (Join-Path $Context.SourceRoot 'roms') $entry.System) $entry.RelativePath
-        if(-not[string]::Equals($info.DestinationRelativePath,$entry.RelativePath,[StringComparison]::OrdinalIgnoreCase) -or $entry.DropboxPath-cne$disk -or $entry.AndroidPath-cne($prefix+$entry.RelativePath) -or $entry.Sha256-cnotmatch'^[a-f0-9]{64}$' -or -not$seen.Add($entry.System+'/'+$entry.RelativePath)){throw 'journal path/hash'}
-        if($entry.PSObject.Properties.Name-cnotcontains'DestinationHash' -or ($entry.DestinationHash -and $entry.DestinationHash-cnotmatch'^[a-f0-9]{64}$')){throw 'journal destination baseline missing'}
+    $dest=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($row in $Destinations){
+        if($dest.ContainsKey($row.RelativePath)){throw 'CLASSIFICATION BLOCK: destination case collision'}
+        $dest.Add($row.RelativePath,$row)
+    }
+    $plan=@()
+    foreach($row in $Android){
+        $result=[pscustomobject]@{System=$System;RelativePath=$row.RelativePath;AndroidRelativePath=$row.RelativePath;Sha256=$row.Sha256;AndroidSha256=$row.Sha256;MatchedDropboxPaths=@();MatchedShaPaths=@();Classification='INVALID';Status='INVALID';Reason='';Action='Block';DestinationRelativePath=$null}
+        try{$relative=Get-ClassificationRelativePath $System $row.RelativePath $Systems}catch{
+            if(Is-LocalOnlyRelativePath $row.RelativePath){
+                # Local-only still requires a valid XML/path shape before being protected.
+                $info=Get-EsdeGamePathInfo $row.RelativePath
+                if($info.Class-ne'Invalid'){$result.Classification='LOCAL_ONLY';$result.Status='LOCAL_ONLY';$result.Action='Preserve';$result.Reason='local-only folder';$plan+=$result;continue}
+            }
+            $result.Reason=$_.Exception.Message;$plan+=$result;continue
+        }
+        if(Is-LocalOnlyRelativePath $row.RelativePath){
+            $result.Classification='LOCAL_ONLY';$result.Status='LOCAL_ONLY';$result.Action='Preserve';$result.Reason='local-only folder';$plan+=$result;continue
+        }
+        if(-not$seen.Add($relative)){$result.Reason='Android case collision';$plan+=$result;continue}
+        if($row.Sha256-cnotmatch'^[a-f0-9]{64}$'){$result.Reason='Android hash unknown';$plan+=$result;continue}
+        if([IO.Path]::GetExtension($relative).ToLowerInvariant()-cnotin(Get-ClassificationExtensions $System)){$result.Reason='invalid ROM extension';$plan+=$result;continue}
+        if($managed.ContainsKey($relative)){$result.MatchedDropboxPaths=@($managed[$relative].RelativePath)}
+        if($index.Hashes.ContainsKey($row.Sha256)){$result.MatchedShaPaths=@($index.Hashes[$row.Sha256])}
+        if($result.MatchedShaPaths.Count-gt1){$result.Classification='AMBIGUOUS';$result.Action='Review';$result.Reason='multiple managed SHA candidates'}
+        elseif($managed.ContainsKey($relative) -and $managed[$relative].RelativePath-ceq$relative){
+            if($managed[$relative].Sha256-ceq$row.Sha256){$result.Classification='MANAGED';$result.Action='None';$result.Reason='canonical path and SHA match'}
+            else{$result.Classification='MANAGED_CONFLICT';$result.Action='PreserveRom';$result.Reason='ROM version/revision/patch requires review; managed metadata remains applicable'}
+        }
+        elseif($result.MatchedShaPaths.Count-eq1){$result.Classification='MANAGED_PATH_MISMATCH';$result.Action='Review';$result.Reason='save/state/media canonicalization mapping not verified'}
+        elseif($managed.ContainsKey($relative)){$result.Classification='AMBIGUOUS';$result.Action='Review';$result.Reason='case-insensitive canonical path collision'}
+        else{
+            $result.Classification='UNMANAGED';$result.Action='Move';$result.Reason='no managed path or SHA match';$result.DestinationRelativePath='_UNREGISTERED/'+$relative
+            if($dest.ContainsKey($result.DestinationRelativePath)){
+                $result.Action='Block';$result.Reason=if($dest[$result.DestinationRelativePath].Sha256-ceq$row.Sha256){'DESTINATION_DUPLICATE_BLOCK'}else{'DESTINATION_COLLISION'}
+            }
+        }
+        $result.Status=$result.Classification;$plan+=$result
+    }
+    return @($plan)
+}
+
+function New-ManagedRomShaIndex([string]$System,[object[]]$Source,[string[]]$Systems) {
+    if($System-cnotin$Systems){throw 'CLASSIFICATION BLOCK: system scope'}
+    $paths=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    $hashes=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    foreach($row in $Source){
+        if(Is-LocalOnlyRelativePath $row.RelativePath){continue}
+        $relative=Get-ClassificationRelativePath $System $row.RelativePath $Systems
+        if(Is-ClassificationAuxiliaryPath $relative){continue}
+        if([IO.Path]::GetExtension($relative).ToLowerInvariant()-cnotin(Get-ClassificationExtensions $System)){throw 'CLASSIFICATION BLOCK: invalid source ROM extension'}
+        if($row.Sha256-cnotmatch'^[a-f0-9]{64}$'){throw 'CLASSIFICATION BLOCK: source hash unknown'}
+        if($paths.ContainsKey($relative)){throw 'CLASSIFICATION BLOCK: source case collision'}
+        $paths.Add($relative,$row)
+        if(-not$hashes.ContainsKey($row.Sha256)){$hashes.Add($row.Sha256,@())}
+        $hashes[$row.Sha256]=@($hashes[$row.Sha256])+@($relative)
+    }
+    return [pscustomobject]@{System=$System;Paths=$paths;Hashes=$hashes}
+}
+
+function New-ManagedCanonicalizationPlan($Classification,$Mapping,[object[]]$Bindings,[string[]]$ExistingPaths,[string[]]$ExistingGamePaths=@()) {
+    # Pure proposal only. No real emulator is currently registered as verified.
+    $review=[pscustomobject]@{Status='REVIEW';Reason='save/state/media mapping not verified';Operations=@()}
+    if($Classification.Classification-cne'MANAGED_PATH_MISMATCH'){return $review}
+    if(-not$Mapping -or $Mapping.schemaVersion-ne1 -or $Mapping.Verified-ne$true -or $Mapping.CompleteInventory-ne$true -or $Mapping.System-cne$Classification.System -or [string]::IsNullOrWhiteSpace($Mapping.Evidence)){return $review}
+    if(@($Classification.MatchedShaPaths).Count-ne1){return $review}
+    $roots=@{ROM=('/storage/emulated/0/ROMs/'+$Classification.System);Save=$Mapping.SaveRoot;State=$Mapping.StateRoot;Media=$Mapping.MediaRoot}
+    $operations=@();$sources=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $targets=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($binding in $Bindings){
+        if($binding.Kind-cnotin@('ROM','Save','State','Media')){throw 'CANONICALIZATION BLOCK: invalid binding kind'}
+        $root=[string]$roots[$binding.Kind]
+        if(-not$root.StartsWith('/storage/emulated/0/') -or $root.Contains('..')){throw 'CANONICALIZATION BLOCK: unknown asset root'}
+        foreach($path in @($binding.SourcePath,$binding.DestinationPath)){
+            if(-not$path.StartsWith($root.TrimEnd('/')+'/',[StringComparison]::Ordinal) -or (Get-EsdeGamePathInfo $path.Substring($root.TrimEnd('/').Length+1)).Class-ne'Managed'){throw 'CANONICALIZATION BLOCK: asset scope/path'}
+        }
+        if($binding.Sha256-cnotmatch'^[a-f0-9]{64}$' -or -not$sources.Add($binding.SourcePath) -or -not$targets.Add($binding.DestinationPath) -or $ExistingPaths-icontains$binding.DestinationPath){throw 'CANONICALIZATION BLOCK: collision or hash unknown'}
+        $operations+=[pscustomobject]@{Kind=$binding.Kind;Action='Rename';SourcePath=$binding.SourcePath;DestinationPath=$binding.DestinationPath;Sha256=$binding.Sha256}
+    }
+    $rom=@($operations|Where-Object Kind -CEQ ROM)
+    if($rom.Count-ne1 -or $rom[0].SourcePath-cne($roots.ROM+'/'+$Classification.RelativePath) -or $rom[0].DestinationPath-cne($roots.ROM+'/'+$Classification.MatchedShaPaths[0]) -or $rom[0].Sha256-cne$Classification.Sha256){throw 'CANONICALIZATION BLOCK: ROM binding mismatch'}
+    # A ROM-only proposal is never accepted. Absent assets also need explicit verified evidence.
+    foreach($kind in @('Save','State','Media')){
+        $count=@($operations|Where-Object Kind -CEQ $kind).Count
+        if(-not$count -and @($Mapping.VerifiedAbsentKinds)-cnotcontains$kind){return $review}
+    }
+    $gameTarget='./'+$Classification.MatchedShaPaths[0]
+    foreach($path in $ExistingGamePaths){
+        $info=Get-EsdeGamePathInfo $path
+        if($info.Class-ceq'Invalid' -or $info.Key-ceq$gameTarget){throw 'CANONICALIZATION BLOCK: gamelist path collision/invalid'}
+    }
+    $operations+=[pscustomobject]@{Kind='Gamelist';Action='UpdatePath';SourcePath=('./'+$Classification.RelativePath);DestinationPath=$gameTarget;Sha256=$null}
+    return [pscustomobject]@{Status='CANONICALIZATION_CANDIDATE';Reason=$Mapping.Evidence;Operations=$operations}
+}
+
+function Get-ClassificationSourceRows($Job) {
+    foreach($item in @(Get-ManagedLocalItems $Job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer})){
+        $relative=$item.FullName.Substring($Job.LocalPath.Length).TrimStart('\','/').Replace('\','/')
+        [pscustomobject]@{RelativePath=$relative;Sha256=(Get-FileHash -LiteralPath $item.FullName).Hash.ToLowerInvariant();FullName=$item.FullName}
     }
 }
 
-function Get-AdoptionInspection([string]$JournalPath,$Context,[string]$BaselinePath) {
-    $evidence=@();$reason=@();$result='UNKNOWN';$journalHash='';$id=''
+function Assert-ClassificationRemoteLinks([string]$Root) {
+    Assert-RemotePath ($Root+'/scope-probe')
+    $q=Quote-Sh $Root
+    $cmd='if [ -L '+$q+' ]; then exit 1; elif [ -d '+$q+' ]; then cd '+$q+' || exit 1; find '+$q+' -mindepth 1 \( -type d \( -iname _TEST -o -iname _UNREGISTERED \) -prune \) -o \( -type l -print \); elif [ -e '+$q+' ]; then exit 1; fi'
+    $r=Invoke-Adb -s $Serial shell $cmd
+    if($r.Code-ne0 -or $r.StdErr -or $r.StdOut.Trim()){throw 'CLASSIFICATION BLOCK: remote link/inventory uncertainty'}
+}
+
+function Test-LocalOnlySystemPresence([string]$Root) {
+    $paths=@(($Root+'/_TEST'),($Root+'/_UNREGISTERED'))
+    $cmd='if [ -e '+(Quote-Sh $paths[0])+' ] || [ -e '+(Quote-Sh $paths[1])+' ]; then printf PRESENT; else printf ABSENT; fi'
+    $r=Invoke-Adb -s $Serial shell $cmd
+    if($r.Code-ne0 -or $r.StdErr -or $r.StdOut-cnotin@('PRESENT','ABSENT')){throw 'local-only presence unknown'}
+    return $r.StdOut-ceq'PRESENT'
+}
+
+function Get-ClassificationAndroidRows($Job,[string]$Session) {
+    Assert-ClassificationRemoteLinks $Job.RemotePath
+    foreach($relative in @(Get-RemoteFiles $Job.RemotePath)){
+        # 기존 ES-DE sidecar는 ROM이 아님. 나머지 미확정 파일은 이동/삭제 대신 차단.
+        if(Is-ClassificationAuxiliaryPath $relative){Write-Log ('ROM PRESERVE AUXILIARY: '+$Job.System+'/'+$relative);continue}
+        $relative=Get-ClassificationRelativePath $Job.System $relative $selectedSystems
+        $read=Read-ClassificationRom ($Job.RemotePath+'/'+$relative) $Session
+        if(-not$read){throw 'CLASSIFICATION BLOCK: inventory changed'}
+        [pscustomobject]@{RelativePath=$relative;Sha256=$read.Sha256}
+    }
+}
+
+function New-ClassificationContext([string]$StateRoot,[string]$Source,[string]$Device) {
+    $root=[IO.Path]::GetFullPath($Source).TrimEnd('\')
+    $identity=Get-MediaTextHash ($root.ToLowerInvariant()+'|'+$Device)
+    $folder=Join-Path $StateRoot 'android-classification'
+    $file=Join-Path $folder ($identity+'.json')
+    [void](Assert-MediaDiskPath $file $StateRoot)
+    if(Test-Path -LiteralPath $file){
+        $state=Get-Content -LiteralPath $file -Raw -Encoding UTF8|ConvertFrom-Json
+        if($state.schemaVersion-ne1 -or $state.identity-cne$identity -or $state.status-cne'completed'){throw 'CLASSIFICATION RECOVERY NEEDED: previous state requires manual review'}
+    }
+    return [pscustomobject]@{Identity=$identity;File=$file;StateRoot=$StateRoot;SourceRoot=$root;Serial=$Device}
+}
+
+function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session) {
+    $source=@(Get-ClassificationSourceRows $RomJob)
+    $android=@(Get-ClassificationAndroidRows $RomJob $Session)
+    $destinations=@()
+    foreach($row in $android){
+        $destination=Read-ClassificationRom ($RomJob.RemotePath+'/_UNREGISTERED/'+$row.RelativePath) $Session
+        if($destination){$destinations+=[pscustomobject]@{RelativePath=('_UNREGISTERED/'+$row.RelativePath);Sha256=$destination.Sha256}}
+    }
+    $classification=@(New-UnregisteredClassificationPlan $RomJob.System $source $android $destinations $selectedSystems)
+    $blocked=@($classification|Where-Object Action -CEQ Block)
+    if($blocked.Count){throw ('CLASSIFICATION BLOCK: '+(($blocked|ForEach-Object {$_.RelativePath+': '+$_.Reason}) -join '; '))}
+    $review=@($classification|Where-Object Action -CEQ Review).Count-gt0
+    foreach($entry in @($classification|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS')})){
+        Write-Log ('ROM WARNING: '+$entry.Classification+' '+$RomJob.System+'/'+$entry.RelativePath+' / '+$entry.Reason)
+    }
+    $moves=@($classification|Where-Object Action -EQ Move)
+    if($review){$moves=@();Write-Log ('ROM REVIEW: '+$RomJob.System+' ROM/XML/media 모두 보존; canonical 중복 전송 없음')}
+    $local=if($XmlPlan.Local){ConvertFrom-EsdeGamelistBytes $XmlPlan.Local.Bytes}else{$null}
+    $existing=@(Get-EsdeGameEntries $local)
+    foreach($move in $moves){
+        $key='./'+$move.RelativePath;$new='./'+$move.DestinationRelativePath
+        if(@($existing|Where-Object Key -CEQ $new).Count){throw ('CLASSIFICATION BLOCK: destination game node collision '+$new)}
+        $nodes=@($existing|Where-Object Key -CEQ $key)
+        if($nodes.Count-gt1){throw 'CLASSIFICATION BLOCK: duplicate source game'}
+        if($nodes.Count){$nodes[0].Node.SelectSingleNode('path').InnerText=$new}
+        $move|Add-Member SourcePath ($RomJob.RemotePath+'/'+$move.RelativePath)
+        $move|Add-Member DestinationPath ($RomJob.RemotePath+'/'+$move.DestinationRelativePath)
+    }
+    if($local){$local.Bytes=ConvertTo-EsdeGamelistBytes $local}
+    # ROM source of truth: normal nodes not backed by source ROM remain whole-node (stale included).
+    $sourceKeys=@($source|Where-Object {-not(Is-ClassificationAuxiliaryPath $_.RelativePath)}|ForEach-Object {'./'+$_.RelativePath})
+    $preserve=@(Get-EsdeGameEntries $local|Where-Object {$_.Class-eq'Managed' -and $sourceKeys-cnotcontains$_.Key}|ForEach-Object Key)
+    $bound=$null
+    if(-not$review){$bound=Get-AndroidBoundGamelist $XmlJob.GamelistSource $local $RomJob.System $preserve}
+    $output=$null
+    if($bound){$output=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-classified.xml');[void](Write-EsdeGamelist $bound $output)}
+    $xml=$XmlPlan.PSObject.Copy();$xml.Output=$output
+    if($review){$xml.ClassificationCommitted=$true}
+    return [pscustomobject]@{System=$RomJob.System;RomJob=$RomJob;Source=$source;Moves=$moves;Inventory=$classification;XmlPlan=$xml;Session=$Session;ReviewRequired=$review;ProtectMedia=($review -or $moves.Count-gt0 -or (Test-LocalOnlySystemPresence $RomJob.RemotePath) -or @(Get-LocalOnlyGameEntries $local).Count-gt0);Validated=$true}
+}
+
+function Assert-ClassificationSourceSnapshot($Plan) {
+    $current=@(Get-ClassificationSourceRows $Plan.RomJob)
+    if(($current|Select-Object RelativePath,Sha256|ConvertTo-Json -Compress)-cne($Plan.Source|Select-Object RelativePath,Sha256|ConvertTo-Json -Compress)){throw 'CLASSIFICATION BLOCK: managed source changed'}
+}
+
+function Invoke-ClassificationMoves([object[]]$Plans,$Context,[string]$Session) {
+    $moving=@($Plans|Where-Object {$_.Moves.Count-gt0})
+    if(-not$moving.Count){return}
+    foreach($plan in $Plans){
+        if(-not$plan.Validated){throw 'classification plan not validated'}
+        Assert-ClassificationSourceSnapshot $plan
+        Assert-GamelistSnapshot $plan.XmlPlan
+        foreach($move in $plan.Moves){
+            $relative=Get-ClassificationRelativePath $plan.System $move.RelativePath $selectedSystems
+            if($move.SourcePath-cne($plan.RomJob.RemotePath+'/'+$relative) -or $move.DestinationPath-cne($plan.RomJob.RemotePath+'/_UNREGISTERED/'+$relative)){throw 'CLASSIFICATION BLOCK: move path tampered'}
+            $src=Read-ClassificationRom $move.SourcePath $Session
+            if(-not$src -or $src.Sha256-cne$move.Sha256 -or (Read-ClassificationRom $move.DestinationPath $Session)){throw 'CLASSIFICATION BLOCK: concurrent ROM change/collision'}
+        }
+    }
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Context.File))
+    $state=[pscustomobject]@{schemaVersion=1;identity=$Context.Identity;status='prepared';at=[DateTimeOffset]::UtcNow.ToString('o');moves=@($moving|ForEach-Object Moves|Select-Object SourcePath,DestinationPath,Sha256);error='';staging=$Session}
+    Write-MediaJson $Context.File $state $Context.StateRoot
     try{
-        [void](Assert-MediaDiskPath $JournalPath $Context.StateRoot)
-        $j=Get-Content -LiteralPath $JournalPath -Raw -Encoding UTF8|ConvertFrom-Json
-        Assert-AdoptionJournalSchema $j $Context (Split-Path -Leaf $JournalPath)
-        $id=$j.transactionId;$journalHash=(Get-FileHash -LiteralPath $JournalPath).Hash.ToLowerInvariant()
-        $baseline=$null;$baselineHash=''
-        if($BaselinePath){
-            $baseline=Get-Content -LiteralPath $BaselinePath -Raw -Encoding UTF8|ConvertFrom-Json
-            $baselineHash=(Get-FileHash -LiteralPath $BaselinePath).Hash.ToLowerInvariant()
+        foreach($plan in $moving){
+            foreach($move in $plan.Moves){
+                # same storage device check; no copy/delete fallback.
+                $r=Invoke-Adb -s $Serial shell ('stat -c %d '+(Quote-Sh $move.SourcePath)+' '+(Quote-Sh $plan.RomJob.RemotePath))
+                $devices=@($r.StdOut.Trim()-split'\r?\n')
+                if($r.Code-ne0 -or $r.StdErr -or $devices.Count-ne2 -or $devices[0]-cne$devices[1]){throw 'CLASSIFICATION BLOCK: filesystem identity unknown/different'}
+                $parent=$move.DestinationPath.Substring(0,$move.DestinationPath.LastIndexOf('/'))
+                # source/hash/destination recheck immediately before no-clobber rename.
+                $src=Read-ClassificationRom $move.SourcePath $Session
+                if(-not$src -or $src.Sha256-cne$move.Sha256 -or (Read-ClassificationRom $move.DestinationPath $Session)){throw 'CLASSIFICATION BLOCK: move race'}
+                Ensure-RemoteDir $parent
+                if(Read-ClassificationRom $move.DestinationPath $Session){throw 'CLASSIFICATION BLOCK: destination appeared'}
+                $r=Invoke-Adb -s $Serial shell ('stat -c %d '+(Quote-Sh $move.SourcePath)+' '+(Quote-Sh $parent))
+                $devices=@($r.StdOut.Trim()-split'\r?\n')
+                if($r.Code-ne0 -or $r.StdErr -or $devices.Count-ne2 -or $devices[0]-cne$devices[1]){throw 'CLASSIFICATION BLOCK: destination filesystem differs'}
+                $state.status='moving';Write-MediaJson $Context.File $state $Context.StateRoot
+                $r=Invoke-Adb -s $Serial shell ('mv -n '+(Quote-Sh $move.SourcePath)+' '+(Quote-Sh $move.DestinationPath))
+                if($r.Code-ne0 -or $r.StdErr){throw 'CLASSIFICATION RECOVERY NEEDED: mv failed'}
+                $dst=Read-ClassificationRom $move.DestinationPath $Session
+                if(-not$dst -or $dst.Sha256-cne$move.Sha256 -or (Read-ClassificationRom $move.SourcePath $Session)){throw 'CLASSIFICATION RECOVERY NEEDED: move verification failed'}
+            }
         }
-        $systems=@($j.entries|ForEach-Object System|Sort-Object -Unique)
-        $xmlBaseline=@()
-        if($j.PSObject.Properties.Name-ccontains'systemSnapshots'){$xmlBaseline=@($j.systemSnapshots)}
-        elseif($baseline -and $systems.Count-eq1 -and $systems[0]-ceq'gb' -and $baseline.Android-is[Array] -and $baseline.Dropbox-is[Array] -and $baseline.DropboxXmlSha-match'^[a-fA-F0-9]{64}$' -and $baseline.AndroidXmlSha-match'^[a-fA-F0-9]{64}$'){
-            $xmlBaseline=@([pscustomobject]@{System='gb';DropboxHash=$baseline.DropboxXmlSha.ToLowerInvariant();AndroidHash=$baseline.AndroidXmlSha.ToLowerInvariant()})
-        }else{throw 'missing gamelist baseline evidence'}
-        $partial=$false;$mismatch=$false;$unknown=$false
-        foreach($entry in $j.entries){
-            $inbox=Read-AdoptionObservation $entry.InboxPath $true
-            $pc=Read-AdoptionObservation $entry.DropboxPath $false
-            $android=Read-AdoptionObservation $entry.AndroidPath $true
-            $androidBefore=$null
-            if($entry.PSObject.Properties.Name-ccontains'AndroidDestinationHash'){$androidBefore=[string]$entry.AndroidDestinationHash}
-            elseif($baseline -and $baseline.Android-is[Array]){
-                $old=@($baseline.Android|Where-Object Path -CEQ $entry.AndroidPath)
-                if($old.Count-gt1){throw 'duplicate baseline ROM'}
-                $androidBefore=if($old.Count){[string]$old[0].Sha256}else{''}
-            }else{throw 'missing Android canonical baseline'}
-            if($androidBefore -and $androidBefore-cnotmatch'^[a-f0-9]{64}$'){throw 'invalid Android baseline hash'}
-            foreach($obs in @($inbox,$pc,$android)){if($obs.State-eq'Unknown'){$unknown=$true;$reason+=@($obs.Reason)}}
-            if($inbox.State-ne'Unknown' -and ($inbox.State-ne'Present' -or $inbox.Sha256-cne$entry.Sha256)){$mismatch=$true}
-            foreach($pair in @(@($pc,[string]$entry.DestinationHash),@($android,$androidBefore))){
-                $obs=$pair[0];$oldHash=$pair[1]
-                if($obs.State-eq'Unknown'){continue}
-                if($oldHash){
-                    if($obs.State-ne'Present' -or $obs.Sha256-cne$oldHash){$mismatch=$true}
-                }elseif($obs.State-eq'Present'){
-                    if($obs.Sha256-ceq$entry.Sha256){$partial=$true}else{$mismatch=$true}
+        $state.status='roms-moved';Write-MediaJson $Context.File $state $Context.StateRoot
+        foreach($plan in $moving){
+            Assert-ClassificationSourceSnapshot $plan
+            Sync-GamelistSystem $plan.XmlPlan
+            if($plan.XmlPlan.Output){
+                $back=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-final.xml')
+                $r=Invoke-Adb -s $Serial pull $plan.XmlPlan.RemoteFile $back
+                if($r.Code-ne0 -or (Get-FileHash -LiteralPath $back).Hash-cne(Get-FileHash -LiteralPath $plan.XmlPlan.Output).Hash){throw 'CLASSIFICATION RECOVERY NEEDED: XML final SHA'}
+                [void](Read-EsdeGamelist $back)
+            }
+            $plan.XmlPlan.ClassificationCommitted=$true
+        }
+        $state.status='completed';Write-MediaJson $Context.File $state $Context.StateRoot
+    }catch{
+        $state.status='recovery-needed';$state.error=$_.Exception.Message
+        try{Write-MediaJson $Context.File $state $Context.StateRoot}catch{Write-Log ('CLASSIFICATION STATE SAVE FAILED: '+$_.Exception.Message)}
+        throw
+    }
+}
+
+function Confirm-ClassificationInventory($Plan,[string]$Session) {
+    if($Plan.ReviewRequired){return}
+    Assert-ClassificationSourceSnapshot $Plan
+    $rows=@(Get-ClassificationAndroidRows $Plan.RomJob $Session)
+    $refresh=@(New-UnregisteredClassificationPlan $Plan.System $Plan.Source $rows @() $selectedSystems)
+    if(@($refresh|Where-Object Action -EQ Move).Count){throw 'CLASSIFICATION BLOCK: new unmanaged ROM after prepared inventory'}
+    if(@($refresh|Where-Object Action -CEQ Block).Count){throw 'CLASSIFICATION BLOCK: invalid refreshed inventory'}
+    $expected=@($Plan.Inventory|Where-Object {$_.Action-cne'Move' -and $_.Classification-cne'LOCAL_ONLY'}|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification|ConvertTo-Json -Compress)
+    $actual=@($refresh|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification|ConvertTo-Json -Compress)
+    if(($expected -join '')-cne($actual -join '')){throw 'CLASSIFICATION BLOCK: ROM inventory changed after prepare'}
+}
+
+function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
+    if($Job.System-cne$Plan.System -or $Job.RemotePath-cne$Plan.RomJob.RemotePath){throw 'managed mirror scope'}
+    if($Plan.ReviewRequired){Write-Log ('ROM REVIEW: mirror skipped '+$Job.System);return}
+    $files=(Get-Item Function:Get-RemoteFiles).ScriptBlock;$dirs=(Get-Item Function:Get-RemoteDirs).ScriptBlock
+    $adb=(Get-Item Function:Invoke-Adb).ScriptBlock
+    $allowed=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $conflicts=@($Plan.Inventory|Where-Object Classification -CEQ MANAGED_CONFLICT|ForEach-Object RelativePath)
+    $transfer=@($Plan.Source|Where-Object {$conflicts-cnotcontains$_.RelativePath -and (-not(Is-ClassificationAuxiliaryPath $_.RelativePath) -or $_.RelativePath-cin@('metadata.txt','systeminfo.txt'))})
+    foreach($row in $transfer){[void]$allowed.Add($row.RelativePath)}
+    $root=$Job.RemotePath
+    $fileFilter={param($path)if($path-cne$root){throw 'mirror root mismatch'};& $files $path|Where-Object {$allowed.Contains($_)}}.GetNewClosure()
+    $dirFilter={param($path)if($path-cne$root){throw 'mirror root mismatch'}; & $dirs $path|Where-Object {-not(Is-LocalOnlyRelativePath $_)}}.GetNewClosure()
+    Set-Item Function:local:Get-RemoteFiles -Value $fileFilter
+    Set-Item Function:local:Get-RemoteDirs -Value $dirFilter
+    # The old fast path pushes a directory. Intercept it rather than weakening Mirror-SystemFolder.
+    $pushFilter={
+        param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+        if($Args.Count-ge6 -and $Args[2]-ceq'push'){
+            $inputPath=$Args[4];$targetPath=$Args[5]
+            if(Test-Path -LiteralPath $inputPath -PathType Container){
+                if([IO.Path]::GetFullPath($inputPath).TrimEnd('\')-cne[IO.Path]::GetFullPath($Job.LocalPath).TrimEnd('\')){throw 'mirror push scope mismatch'}
+                foreach($row in $transfer){
+                    $destination=$root+'/'+$row.RelativePath
+                    $r=Send-ClassifiedManagedFile $row $destination $Plan.Session $adb
+                    if($r.Code-ne0){return $r}
                 }
+                return [pscustomobject]@{Code=0;StdOut='';StdErr='';Output=@()}
             }
-            $residue=@(Get-ChildItem -LiteralPath (Split-Path -Parent $entry.DropboxPath) -File -ErrorAction Stop|Where-Object {$_.Name.StartsWith((Split-Path -Leaf $entry.DropboxPath)+'.esde-adoption-',[StringComparison]::Ordinal)})
-            $remoteResidue=Read-AdoptionRemoteResidue $entry.AndroidPath
-            $inboxResidue=Read-AdoptionRemoteResidue $entry.InboxPath
-            if($residue.Count -or @($remoteResidue.Paths).Count -or @($inboxResidue.Paths).Count -or $remoteResidue.State-ne'Known' -or $inboxResidue.State-ne'Known'){$unknown=$true;$reason+=@('staging residue/lookup unknown')}
-            $evidence+=[pscustomobject]@{System=$entry.System;InboxPath=$entry.InboxPath;CanonicalPath=$entry.RelativePath;ExpectedSha=$entry.Sha256;Inbox=$inbox;Dropbox=$pc;Android=$android;DropboxBefore=[string]$entry.DestinationHash;AndroidBefore=$androidBefore;Residue=@($residue|ForEach-Object Name)+@($remoteResidue.Paths)+@($inboxResidue.Paths)}
+            $relative=$inputPath.Substring($Job.LocalPath.Length).TrimStart('\','/').Replace('\','/')
+            if(-not$allowed.Contains($relative)){return [pscustomobject]@{Code=0;StdOut='';StdErr='';Output=@()}}
+            $row=@($transfer|Where-Object RelativePath -CEQ $relative)[0]
+            return (Send-ClassifiedManagedFile $row ($root+'/'+$relative) $Plan.Session $adb)
         }
-        foreach($system in $systems){
-            $snapshot=@($xmlBaseline|Where-Object System -CEQ $system)
-            if($snapshot.Count-ne1){throw 'missing/duplicate XML baseline'}
-            $snapshot=$snapshot[0]
-            foreach($side in @('Dropbox','Android')){
-                $old=[string]$snapshot.($side+'Hash')
-                if($old -and $old-cnotmatch'^[a-f0-9]{64}$'){throw 'invalid XML baseline hash'}
-                $path=if($side-eq'Dropbox'){Join-Path (Join-Path (Join-Path $Context.SourceRoot 'gamelists') $system) 'gamelist.xml'}else{'/storage/emulated/0/ES-DE/gamelists/'+$system+'/gamelist.xml'}
-                $obs=Read-AdoptionObservation $path ($side-eq'Android')
-                if($side-eq'Android'){
-                    $xmlResidue=Read-AdoptionRemoteResidue $path '.esde-sync-new-*'
-                    if($xmlResidue.State-ne'Known' -or @($xmlResidue.Paths).Count){$unknown=$true;$reason+=@('Android XML staging residue/unknown')}
-                }else{
-                    $dir=Split-Path -Parent $path
-                    if(Test-Path -LiteralPath $dir){
-                        $xmlResidue=@(Get-ChildItem -LiteralPath $dir -File|Where-Object {$_.Name.StartsWith('gamelist.xml.esde-adoption-',[StringComparison]::Ordinal)})
-                        if($xmlResidue.Count){$unknown=$true;$reason+=@('Dropbox XML staging residue')}
-                    }
-                }
-                if($obs.State-eq'Unknown'){$unknown=$true;$reason+=@($obs.Reason)}
-                elseif(($old -and ($obs.State-ne'Present' -or $obs.Sha256-cne$old)) -or (-not$old -and $obs.State-ne'Absent')){$mismatch=$true}
-                $evidence+=[pscustomobject]@{System=$system;Side=$side;GamelistPath=$path;Before=$old;Current=$obs}
-            }
-        }
-        $late=@($j.history|Where-Object {$_.state-cnotin@('staged','source-verified','failed')}).Count-gt0
-        $result=if($mismatch){'STATE_MISMATCH'}elseif($partial){'PARTIAL_COMMIT'}elseif($unknown){'UNKNOWN'}elseif($late -or $j.completed){'STATE_MISMATCH'}elseif($j.state-cne'failed'){$reason+=@('nonterminal journal: active/crashed state requires review');'UNKNOWN'}else{'NO_COMMIT_CONFIRMED'}
-        $payload=[pscustomobject]@{JournalSha256=$journalHash;BaselineSha256=$baselineHash;Observations=$evidence;History=@($j.history)}
-        $fingerprint=Get-MediaTextHash ($payload|ConvertTo-Json -Depth 20 -Compress)
-        return [pscustomobject]@{Result=$result;TransactionId=$id;JournalPath=$JournalPath;JournalSha256=$journalHash;Identity=$Context.Identity;Evidence=$payload;EvidenceSha256=$fingerprint;Reasons=$reason}
-    }catch{return [pscustomobject]@{Result='UNKNOWN';TransactionId=$id;JournalPath=$JournalPath;JournalSha256=$journalHash;Identity=$Context.Identity;Evidence=$evidence;Reasons=@($_.Exception.Message)}}
+        & $adb @Args
+    }.GetNewClosure()
+    Set-Item Function:local:Invoke-Adb -Value $pushFilter
+    Mirror-SystemFolder $Job.LocalPath $Job.RemotePath $Label
 }
 
-function Assert-AdoptionResolution($Resolution,$Journal,[string]$JournalSha,$Context) {
-    foreach($name in @('schemaVersion','transactionId','identity','resolution','approved','approvedAt','approvedBy','reason','inspectorResult','journalSha256','evidence','evidenceSha256')){
-        if($Resolution.PSObject.Properties.Name-cnotcontains$name){throw 'ADOPTION BLOCK: resolution missing field'}
+function Send-ClassifiedManagedFile($Row,[string]$Remote,[string]$Session,[scriptblock]$Adb) {
+    $unchanged=[pscustomobject]@{Code=0;StdOut='';StdErr='';Output=@()}
+    if((Get-FileHash -LiteralPath $Row.FullName).Hash.ToLowerInvariant()-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: managed source changed before push'}
+    $current=Read-ClassificationRom $Remote $Session
+    if($current){
+        if($current.Sha256-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: concurrent MANAGED_CONFLICT before push'}
+        return $unchanged
     }
-    $date=[DateTimeOffset]::MinValue
-    if($Journal.state-cne'failed' -or $Journal.completed){throw 'ADOPTION BLOCK: only failed no-commit journal can be abandoned'}
-    if($Resolution.schemaVersion-isnot[int] -or $Resolution.schemaVersion-ne1 -or $Resolution.transactionId-cne$Journal.transactionId -or $Resolution.identity-cne$Context.Identity -or $Resolution.resolution-cne'abandoned' -or $Resolution.approved-isnot[bool] -or -not$Resolution.approved -or -not$Resolution.approvedBy -or -not$Resolution.reason -or -not[DateTimeOffset]::TryParse([string]$Resolution.approvedAt,[ref]$date) -or $Resolution.inspectorResult-cne'NO_COMMIT_CONFIRMED' -or $Resolution.journalSha256-cne$JournalSha -or $Resolution.evidence.JournalSha256-cne$JournalSha){throw 'ADOPTION BLOCK: resolution schema/identity/evidence mismatch'}
-    if((Get-MediaTextHash ($Resolution.evidence|ConvertTo-Json -Depth 20 -Compress))-cne$Resolution.evidenceSha256){throw 'ADOPTION BLOCK: resolution evidence fingerprint'}
-    # 판정 결과 문자열만으로 폐기하지 않음: 관찰 내용과 baseline/hash를 다시 검증.
-    if(($Resolution.evidence.History|ConvertTo-Json -Depth 8 -Compress)-cne($Journal.history|ConvertTo-Json -Depth 8 -Compress)){throw 'ADOPTION BLOCK: resolution history mismatch'}
-    if(@($Resolution.evidence.History|Where-Object {$_.state-cnotin@('staged','source-verified','failed')}).Count){throw 'ADOPTION BLOCK: committed history resolution'}
-    $rom=@($Resolution.evidence.Observations|Where-Object {$_.PSObject.Properties.Name-ccontains'InboxPath'})
-    if($rom.Count-ne@($Journal.entries).Count){throw 'ADOPTION BLOCK: incomplete resolution observations'}
-    foreach($entry in $Journal.entries){
-        $obs=@($rom|Where-Object InboxPath -CEQ $entry.InboxPath)
-        if($obs.Count-ne1){throw 'ADOPTION BLOCK: resolution ROM missing'}
-        $obs=$obs[0]
-        if($obs.DropboxBefore-cne$entry.DestinationHash -or ($entry.PSObject.Properties.Name-ccontains'AndroidDestinationHash' -and $obs.AndroidBefore-cne$entry.AndroidDestinationHash)){throw 'ADOPTION BLOCK: resolution baseline mismatch'}
-        if($obs.ExpectedSha-cne$entry.Sha256 -or $obs.Inbox.State-cne'Present' -or $obs.Inbox.Sha256-cne$entry.Sha256 -or @($obs.Residue).Count){throw 'ADOPTION BLOCK: resolution inbox evidence'}
-        foreach($side in @('Dropbox','Android')){
-            $before=[string]$obs.($side+'Before');$actual=$obs.$side
-            if(($before -and ($actual.State-cne'Present' -or $actual.Sha256-cne$before)) -or (-not$before -and $actual.State-cne'Absent')){throw 'ADOPTION BLOCK: resolution canonical evidence'}
-        }
-    }
-    foreach($system in @($Journal.entries|ForEach-Object System|Sort-Object -Unique)){
-        foreach($side in @('Dropbox','Android')){
-            $xml=@($Resolution.evidence.Observations|Where-Object {$_.System-ceq$system -and $_.Side-ceq$side -and $_.PSObject.Properties.Name-ccontains'GamelistPath'})
-            if($xml.Count-ne1){throw 'ADOPTION BLOCK: resolution XML missing'}
-            $xml=$xml[0]
-            $expectedPath=if($side-eq'Dropbox'){Join-Path (Join-Path (Join-Path $Context.SourceRoot 'gamelists') $system) 'gamelist.xml'}else{'/storage/emulated/0/ES-DE/gamelists/'+$system+'/gamelist.xml'}
-            if($xml.GamelistPath-cne$expectedPath){throw 'ADOPTION BLOCK: resolution XML path'}
-            if($Journal.PSObject.Properties.Name-ccontains'systemSnapshots'){
-                $snap=@($Journal.systemSnapshots|Where-Object System -CEQ $system)
-                if($snap.Count-ne1 -or $xml.Before-cne$snap[0].($side+'Hash')){throw 'ADOPTION BLOCK: resolution XML baseline'}
-            }elseif($Resolution.evidence.BaselineSha256-cnotmatch'^[a-f0-9]{64}$'){throw 'ADOPTION BLOCK: resolution legacy baseline missing'}
-            if(($xml.Before -and ($xml.Current.State-cne'Present' -or $xml.Current.Sha256-cne$xml.Before)) -or (-not$xml.Before -and $xml.Current.State-cne'Absent')){throw 'ADOPTION BLOCK: resolution XML evidence'}
-        }
-    }
+    Ensure-RemoteDir $Remote.Substring(0,$Remote.LastIndexOf('/'))
+    $r=& $Adb -s $Serial push --sync $Row.FullName $Remote
+    if($r.Code-ne0){return $r}
+    $verify=Read-ClassificationRom $Remote $Session
+    if(-not$verify -or $verify.Sha256-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: managed push SHA mismatch'}
+    return $r
 }
 
-function New-AdoptionAbandonResolution([string]$JournalPath,$Context,[string]$BaselinePath,[string]$Reason,[switch]$Approved) {
-    if(-not$Approved -or [string]::IsNullOrWhiteSpace($Reason)){throw 'ADOPTION BLOCK: explicit user approval/reason required'}
-    $inspection=Get-AdoptionInspection $JournalPath $Context $BaselinePath
-    if($inspection.Result-cne'NO_COMMIT_CONFIRMED'){throw 'ADOPTION BLOCK: abandon requires NO_COMMIT_CONFIRMED'}
-    $j=Get-Content -LiteralPath $JournalPath -Raw -Encoding UTF8|ConvertFrom-Json
-    $resolution=[pscustomobject]@{schemaVersion=1;transactionId=$j.transactionId;identity=$Context.Identity;resolution='abandoned';approved=$true;approvedAt=[DateTimeOffset]::UtcNow.ToString('o');approvedBy=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;reason=$Reason;inspectorResult=$inspection.Result;journalSha256=$inspection.JournalSha256;evidence=$inspection.Evidence;evidenceSha256=$inspection.EvidenceSha256}
-    Assert-AdoptionResolution $resolution $j $inspection.JournalSha256 $Context
-    Assert-AdoptionFingerprint $JournalPath $inspection.JournalSha256
-    $folder=Join-Path (Join-Path $Context.StateRoot 'adoption-resolutions') $Context.Identity
-    $path=Join-Path $folder ($j.transactionId+'.json')
-    [void](Assert-MediaDiskPath $path $Context.StateRoot)
-    if(Test-Path -LiteralPath $path){throw 'ADOPTION BLOCK: resolution already exists'}
-    [void][IO.Directory]::CreateDirectory($folder)
-    $prepared=Join-Path $folder ([guid]::NewGuid().ToString('N')+'.new')
-    try{
-        Write-MediaJson $prepared $resolution $Context.StateRoot
-        $check=Get-Content -LiteralPath $prepared -Raw -Encoding UTF8|ConvertFrom-Json
-        Assert-AdoptionResolution $check $j $inspection.JournalSha256 $Context
-        Assert-AdoptionFingerprint $JournalPath $inspection.JournalSha256
-        [IO.File]::Move($prepared,$path) # no overwrite: concurrent resolution cannot be replaced
-    }finally{if([IO.File]::Exists($prepared)){[IO.File]::Delete($prepared)}}
-    return $resolution
-}
-
-function New-AdoptionExecutorContext([string]$StateRoot,[string]$LibraryRoot,[string]$DeviceSerial,[string[]]$Systems,[switch]$DeferJournalGate) {
-    $root=[IO.Path]::GetFullPath($LibraryRoot).TrimEnd('\')
-    if(-not$DeviceSerial -or -not$Systems.Count){throw 'ADOPTION BLOCK: identity/selected systems 필요'}
-    $identity=Get-MediaTextHash ($root.ToLowerInvariant()+'|'+$DeviceSerial)
-    $folder=Join-Path (Join-Path $StateRoot 'adoption-transactions') $identity
-    [void](Assert-MediaDiskPath (Join-Path $folder 'guard.json') $StateRoot)
-    if(-not$DeferJournalGate -and (Test-Path -LiteralPath $folder)){
-        foreach($file in Get-ChildItem -LiteralPath $folder -File){
-            if($file.Name-cmatch'^[a-f0-9]{32}\.json\.bak$'){continue}
-            if($file.Name-cnotmatch'^[a-f0-9]{32}\.json$'){throw 'ADOPTION BLOCK: 알 수 없는 journal 자료'}
-            $j=Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8|ConvertFrom-Json
-            foreach($field in @('schemaVersion','identity','transactionId','createdAt','updatedAt','state','completed','originalError','entries')){
-                if($j.PSObject.Properties.Name-cnotcontains$field){throw 'ADOPTION BLOCK: journal 필수 field 누락'}
-            }
-            if($j.schemaVersion-isnot[int] -or $j.schemaVersion-ne1 -or $j.completed-isnot[bool] -or $j.identity-cne$identity -or $j.entries-isnot[Array] -or $j.transactionId-cnotmatch'^[a-f0-9]{32}$' -or $file.Name-cne($j.transactionId+'.json') -or @($j.entries).Count-eq0){throw 'ADOPTION BLOCK: 미완료/identity journal 수동 검토 필요'}
-            $ctx=[pscustomobject]@{Identity=$identity;SourceRoot=$root}
-            if(-not$j.completed -or $j.state-cne'completed'){
-                Assert-AdoptionJournalSchema $j $ctx $file.Name
-                $resolutionPath=Join-Path (Join-Path (Join-Path $StateRoot 'adoption-resolutions') $identity) $file.Name
-                [void](Assert-MediaDiskPath $resolutionPath $StateRoot)
-                if(-not(Test-Path -LiteralPath $resolutionPath)){throw 'ADOPTION BLOCK: incomplete journal requires review'}
-                $resolution=Get-Content -LiteralPath $resolutionPath -Raw -Encoding UTF8|ConvertFrom-Json
-                Assert-AdoptionResolution $resolution $j ((Get-FileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant()) $ctx
-            }
-            $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-            foreach($entry in $j.entries){
-                $prefix='/storage/emulated/0/ROMs/'+$entry.System+'/'
-                if(-not([string]$entry.InboxPath).StartsWith($prefix,[StringComparison]::Ordinal)){throw 'ADOPTION BLOCK: journal inbox scope'}
-                $info=Get-UnregisteredAdoptionPath $entry.System $entry.InboxPath.Substring($prefix.Length) @($entry.System)
-                if(-not[string]::Equals($info.DestinationRelativePath,$entry.RelativePath,[StringComparison]::OrdinalIgnoreCase) -or $entry.Sha256-cnotmatch'^[a-f0-9]{64}$' -or -not$seen.Add($entry.System+'/'+$entry.RelativePath)){throw 'ADOPTION BLOCK: journal path/hash/key'}
-            }
-        }
-    }
-    return [pscustomobject]@{StateRoot=[IO.Path]::GetFullPath($StateRoot);SourceRoot=$root;Serial=$DeviceSerial;Systems=$Systems;Identity=$identity;JournalRoot=$folder}
-}
-
-function Get-AdoptionRemoteFile([string]$Path,[string]$Session) {
+function Read-ClassificationRom([string]$Path,[string]$Session) {
     Assert-RemotePath $Path
-    if(-not$Path.StartsWith('/storage/emulated/0/ROMs/')){throw 'adoption ROM root 오류'}
+    if(-not$Path.StartsWith('/storage/emulated/0/ROMs/')){throw 'classification ROM root 오류'}
     $parts=$Path.Split('/')
     $checks=New-Object 'Collections.Generic.List[string]'
     for($i=4;$i-lt$parts.Length;$i++){
@@ -1466,7 +1263,7 @@ function Get-AdoptionRemoteFile([string]$Path,[string]$Session) {
     $q=Quote-Sh $Path
     $command=($checks-join'; ')+'; if [ -f '+$q+' ]; then printf PRESENT; elif [ -e '+$q+' ]; then exit 1; else printf ABSENT; fi'
     $r=Invoke-Adb -s $Serial shell $command
-    if($r.Code-ne0 -or $r.StdErr -or $r.StdOut-cnotin@('PRESENT','ABSENT')){throw 'adoption ROM 상태/링크 조회 실패'}
+    if($r.Code-ne0 -or $r.StdErr -or $r.StdOut-cnotin@('PRESENT','ABSENT')){throw 'classification ROM 상태/링크 조회 실패'}
     if($r.StdOut-ceq'ABSENT'){return $null}
     $nativeHash=$null;$method='pull'
     foreach($hashCommand in @('sha256sum ','toybox sha256sum ')){
@@ -1478,302 +1275,11 @@ function Get-AdoptionRemoteFile([string]$Path,[string]$Session) {
     # native/toybox가 없으면 pull SHA를 사용하며, 지원되면 실제 Android SHA와 비교한다.
     $file=Join-Path $Session ([guid]::NewGuid().ToString('N')+'.rom')
     $r=Invoke-Adb -s $Serial pull $Path $file
-    if($r.Code-ne0 -or -not[IO.File]::Exists($file)){throw 'adoption ROM pull 실패'}
+    if($r.Code-ne0 -or -not[IO.File]::Exists($file)){throw 'classification ROM pull 실패'}
     $pulledHash=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-    if($nativeHash -and $nativeHash-cne$pulledHash){throw 'adoption Android/pull SHA 불일치'}
+    if($nativeHash -and $nativeHash-cne$pulledHash){throw 'classification Android/pull SHA 불일치'}
     return [pscustomobject]@{Path=$Path;File=$file;Sha256=$pulledHash;HashMethod=$method}
 }
-
-function Get-AdoptionInboxPaths([string]$System) {
-    [void](Get-UnregisteredAdoptionPath $System '_UNREGISTERED/probe.gb' $selectedSystems)
-    $root='/storage/emulated/0/ROMs/'+$System+'/_UNREGISTERED'
-    Assert-RemotePath $root
-    $q=Quote-Sh $root
-    $command='if [ -L '+$q+' ]; then exit 1; elif [ -d '+$q+' ]; then find '+$q+' -mindepth 1 \( -type f -o -type l \) -print0; elif [ -e '+$q+' ]; then exit 1; fi'
-    $r=Invoke-Adb -s $Serial shell $command
-    if($r.Code-ne0 -or $r.StdErr){throw 'ADOPTION BLOCK: inbox scan 실패'}
-    foreach($path in $r.StdOut.Split([char]0)){
-        if(-not$path){continue}
-        if(-not$path.StartsWith($root+'/',[StringComparison]::Ordinal)){throw 'ADOPTION BLOCK: inbox 범위 밖'}
-        $relative='_UNREGISTERED/'+$path.Substring($root.Length+1)
-        [void](Get-UnregisteredAdoptionPath $System $relative $selectedSystems)
-        $relative
-    }
-}
-
-function Get-AdoptionBytesHash([byte[]]$Bytes) {
-    $sha=[Security.Cryptography.SHA256]::Create()
-    try{return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-}
-function Assert-AdoptionFingerprint([string]$Path,[string]$ExpectedHash) {
-    $actual=if([IO.File]::Exists($Path)){(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}else{''}
-    if($actual-cne$ExpectedHash){throw ('CONCURRENT MODIFICATION: '+$Path)}
-}
-
-function Assert-AdoptionDestinationPath([string]$Path,$Context) {
-    $full=[IO.Path]::GetFullPath($Path)
-    $root=$Context.SourceRoot.TrimEnd('\')+'\'
-    if(-not$full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'ADOPTION BLOCK: source root 탈출'}
-    $cursor=$full
-    while(-not(Test-Path -LiteralPath $cursor)){
-        $parent=Split-Path -Parent $cursor
-        if(-not$parent -or $parent-ceq$cursor){throw 'ADOPTION BLOCK: destination parent 없음'}
-        $cursor=$parent
-    }
-    Assert-LocalSourcePath $cursor $Context.SourceRoot
-}
-function Install-AdoptionDiskFile([string]$Staged,[string]$Destination,[string]$ExpectedHash,$Context,[bool]$Xml=$false) {
-    Assert-AdoptionDestinationPath $Destination $Context
-    $hash=(Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash.ToLowerInvariant()
-    if($Xml){[void](Read-EsdeGamelist $Staged)}
-    $parent=Split-Path -Parent $Destination
-    [void][IO.Directory]::CreateDirectory($parent)
-    Assert-AdoptionDestinationPath $Destination $Context
-    $temp=$Destination+'.esde-adoption-'+[guid]::NewGuid().ToString('N')
-    try{
-        [IO.File]::Copy($Staged,$temp,$false)
-        if((Get-FileHash -LiteralPath $temp -Algorithm SHA256).Hash.ToLowerInvariant()-cne$hash){throw 'adoption PC staging SHA 불일치'}
-        if($Xml){[void](Read-EsdeGamelist $temp)}
-        Assert-AdoptionFingerprint $Destination $ExpectedHash
-        if($ExpectedHash){[IO.File]::Replace($temp,$Destination,[Management.Automation.Language.NullString]::Value)}
-        else{[IO.File]::Move($temp,$Destination)}
-    }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
-    Assert-AdoptionFingerprint $Destination $hash
-}
-
-function Install-AdoptionRemoteRom($Entry,[string]$Session) {
-    $current=Get-AdoptionRemoteFile $Entry.AndroidPath $Session
-    if($current){
-        if($current.Sha256-cne$Entry.Sha256){throw 'ADOPTION BLOCK: Android canonical 충돌'}
-        return
-    }
-    $temp=$Entry.AndroidPath+'.esde-adoption-'+[guid]::NewGuid().ToString('N')
-    Assert-RemotePath $temp
-    Ensure-RemoteDir (Split-Path -Parent $Entry.AndroidPath).Replace('\','/')
-    $attempted=$false
-    try{
-        $attempted=$true
-        $r=Invoke-Adb -s $Serial push $Entry.StagedFile $temp
-        if($r.Code-ne0){throw 'adoption Android temp push 실패'}
-        $back=Get-AdoptionRemoteFile $temp $Session
-        if(-not$back -or $back.Sha256-cne$Entry.Sha256){throw 'adoption Android staging SHA 불일치'}
-        # no-clobber: 다른 writer가 canonical을 만들었으면 검증 후 충돌/재사용.
-        $r=Invoke-Adb -s $Serial shell ('mv -n '+(Quote-Sh $temp)+' '+(Quote-Sh $Entry.AndroidPath))
-        if($r.Code-ne0 -or $r.StdErr){throw 'adoption Android canonical mv 실패'}
-        $final=Get-AdoptionRemoteFile $Entry.AndroidPath $Session
-        if(-not$final -or $final.Sha256-cne$Entry.Sha256){throw 'adoption Android canonical SHA 불일치'}
-    }finally{
-        if($attempted){try{Remove-RemoteFile $temp}catch{Write-Log ('ADOPTION TEMP CLEANUP FAILED: '+$_.Exception.Message)}}
-    }
-}
-
-function Remove-AdoptionInboxSource($Entry,$Context,[string]$Session,[bool]$AllVerified) {
-    if(-not$AllVerified){throw 'ADOPTION BLOCK: 최종 검증 전 inbox 삭제 금지'}
-    $info=Get-UnregisteredAdoptionPath $Entry.System $Entry.InboxRelative $Context.Systems
-    $expected='/storage/emulated/0/ROMs/'+$Entry.System+'/'+$Entry.InboxRelative
-    if($Entry.InboxPath-cne$expected -or -not[string]::Equals($Entry.RelativePath,$info.DestinationRelativePath,[StringComparison]::OrdinalIgnoreCase)){throw 'ADOPTION BLOCK: inbox 삭제 범위 불일치'}
-    $current=Get-AdoptionRemoteFile $expected $Session
-    if(-not$current -or $current.Sha256-cne$Entry.Sha256){throw 'ADOPTION BLOCK: inbox source 변경'}
-    # 일반 삭제 함수의 reserved 보호는 그대로 유지; 이 검증된 단일 inbox 파일만 삭제.
-    $r=Invoke-Adb -s $Serial shell ('rm -f '+(Quote-Sh $expected))
-    if($r.Code-ne0 -or $r.StdErr -or (Get-AdoptionRemoteFile $expected $Session)){throw 'adoption inbox 삭제 실패'}
-}
-
-function Prepare-UnregisteredAdoptionSystem($RomJob,$GamelistJob,$GamelistPlan,$Context,[string]$Session) {
-    if($RomJob.System-cne$GamelistJob.System -or $Context.Systems-cnotcontains$RomJob.System){throw 'adoption selected system 오류'}
-    $system=$RomJob.System
-    $paths=@(Get-AdoptionInboxPaths $system)
-    if(-not$paths.Count){return $null}
-    $candidates=@();$destinations=@();$staged=@{}
-    foreach($relative in $paths){
-        $info=Get-UnregisteredAdoptionPath $system $relative $Context.Systems
-        $source=Get-AdoptionRemoteFile ('/storage/emulated/0/ROMs/'+$system+'/'+$relative) $Session
-        if(-not$source){throw 'adoption source 누락'}
-        $candidate=[pscustomobject]@{System=$system;RelativePath=$relative;AndroidSha256=$source.Sha256;StagedSha256=(Get-FileHash -LiteralPath $source.File).Hash.ToLowerInvariant()}
-        $candidates+=$candidate;$staged[$relative]=$source
-    }
-    # 목적지 전체 목록을 검사해 Windows case-insensitive 충돌과 링크를 차단.
-    foreach($file in @(Get-ManagedLocalItems $RomJob.LocalPath $Context.SourceRoot|Where-Object {-not$_.PSIsContainer})){
-        $relative=$file.FullName.Substring($RomJob.LocalPath.Length).TrimStart('\','/').Replace('\','/')
-        $destinations+=[pscustomobject]@{System=$system;RelativePath=$relative;Sha256=(Get-FileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant()}
-    }
-    $pure=@(New-UnregisteredAdoptionPlan $candidates $destinations $Context.Systems)
-    $entries=@()
-    $base=$GamelistJob.GamelistSource
-    $shared=if($base){ConvertFrom-EsdeGamelistBytes $base.Bytes}else{ConvertFrom-EsdeGamelistBytes ([Text.Encoding]::UTF8.GetBytes('<gameList/>'))}
-    $local=if($GamelistPlan.Local){ConvertFrom-EsdeGamelistBytes $GamelistPlan.Local.Bytes}else{$null}
-    $sharedChanged=$false
-    foreach($item in $pure){
-        $relative=$item.DestinationRelativePath
-        $disk=Join-Path $RomJob.LocalPath $relative
-        Assert-AdoptionDestinationPath $disk $Context
-        $inbox=$staged[$item.InboxPath.Substring(2)]
-        $androidPath='/storage/emulated/0/ROMs/'+$system+'/'+$relative
-        $existing=Get-AdoptionRemoteFile $androidPath $Session
-        if($existing -and $existing.Sha256-cne$item.Sha256){throw 'ADOPTION BLOCK: Android canonical SHA 충돌'}
-        $inboxNode=@(Get-EsdeGameEntries $local|Where-Object Key -CEQ $item.InboxPath)
-        $normalNode=@(Get-EsdeGameEntries $local|Where-Object Key -CEQ $item.ManagedPath)
-        $baseNode=@(Get-EsdeGameEntries $shared|Where-Object Key -CEQ $item.ManagedPath)
-        if($inboxNode.Count-gt1 -or $normalNode.Count-gt1 -or $baseNode.Count-gt1){throw 'ADOPTION BLOCK: metadata 중복'}
-        $proposal=New-AdoptionGamePromotion $(if($inboxNode.Count){$inboxNode[0].Node}) $item.ManagedPath $(if($baseNode.Count){$baseNode[0].Node}) $(if($normalNode.Count){$normalNode[0].Node})
-        if($proposal.NeedsPolicyDecision){throw ('ADOPTION BLOCK: policy unresolved / '+($proposal.PendingFields-join','))}
-        if($proposal.CreateGame){
-            $list=$shared.Document.DocumentElement.SelectSingleNode('gameList')
-            if(-not$baseNode.Count){[void]$list.AppendChild($shared.Document.ImportNode($proposal.DropboxNode,$true));$sharedChanged=$true}
-            if($local){
-                $localList=$local.Document.DocumentElement.SelectSingleNode('gameList')
-                if($inboxNode.Count){[void]$localList.RemoveChild($inboxNode[0].Node)}
-                if($normalNode.Count){[void]$localList.RemoveChild($normalNode[0].Node)}
-                [void]$localList.AppendChild($local.Document.ImportNode($proposal.AndroidNode,$true))
-                $local.Bytes=ConvertTo-EsdeGamelistBytes $local
-            }
-        }
-        $entries+=[pscustomobject]@{System=$system;InboxRelative=$item.InboxPath.Substring(2);InboxPath=$inbox.Path;RelativePath=$relative;Sha256=$item.Sha256;StagedFile=$inbox.File;DropboxPath=$disk;AndroidPath=$androidPath;DestinationHash=$(if($item.Action-ceq'ReuseIdentical'){$item.Sha256}else{''});AndroidDestinationHash=$(if($existing){$existing.Sha256}else{''})}
-    }
-    $shared.Bytes=ConvertTo-EsdeGamelistBytes $shared
-    $sharedOutput=$null
-    if($sharedChanged){$sharedOutput=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-shared.xml');[void](Write-EsdeGamelist $shared $sharedOutput)}
-    $bound=Get-AndroidBoundGamelist $(if($base -or $sharedChanged){$shared}) $local $system $GamelistPlan.PreservedUnmanagedPaths
-    $output=$null
-    if($bound){$output=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-android.xml');[void](Write-EsdeGamelist $bound $output)}
-    $androidPlan=$GamelistPlan.PSObject.Copy();$androidPlan.Output=$output
-    $dropboxXml=Join-Path $GamelistJob.LocalPath 'gamelist.xml'
-    $systemPlan=[pscustomobject]@{System=$system;DropboxGamelist=$dropboxXml;DropboxHash=$(if($base){Get-AdoptionBytesHash $base.Bytes}else{''});SharedOutput=$sharedOutput;SharedHash=$(if($sharedOutput){(Get-FileHash -LiteralPath $sharedOutput).Hash.ToLowerInvariant()}else{''});AndroidHash=$(if($output){(Get-FileHash -LiteralPath $output).Hash.ToLowerInvariant()}else{''});AndroidPlan=$androidPlan}
-    return [pscustomobject]@{Validated=$true;Identity=$Context.Identity;Entries=$entries;Systems=@($systemPlan);Session=$Session}
-}
-
-function Restore-AdoptionInboxSource($Entry,$Context,[string]$Session) {
-    # 실행 중 cleanup 실패의 보상은 inbox 복사본에만 한정한다.
-    # 기존 canonical/XML은 되돌리지 않으며 미완료 journal의 자동 복구도 하지 않는다.
-    $info=Get-UnregisteredAdoptionPath $Entry.System $Entry.InboxRelative $Context.Systems
-    $path='/storage/emulated/0/ROMs/'+$Entry.System+'/'+$Entry.InboxRelative
-    if($Entry.InboxPath-cne$path -or -not[string]::Equals($info.DestinationRelativePath,$Entry.RelativePath,[StringComparison]::OrdinalIgnoreCase)){throw 'inbox 보상 범위 불일치'}
-    $current=Get-AdoptionRemoteFile $path $Session
-    if($current){
-        if($current.Sha256-cne$Entry.Sha256){throw 'inbox 보상 충돌: 사용자 파일 덮어쓰기 금지'}
-        return
-    }
-    Assert-AdoptionFingerprint $Entry.StagedFile $Entry.Sha256
-    $temp=$path+'.esde-adoption-restore-'+[guid]::NewGuid().ToString('N')
-    try{
-        $r=Invoke-Adb -s $Serial push $Entry.StagedFile $temp
-        if($r.Code-ne0){throw 'inbox 보상 전송 실패'}
-        $back=Get-AdoptionRemoteFile $temp $Session
-        if(-not$back -or $back.Sha256-cne$Entry.Sha256){throw 'inbox 보상 SHA 불일치'}
-        $r=Invoke-Adb -s $Serial shell ('mv -n '+(Quote-Sh $temp)+' '+(Quote-Sh $path))
-        if($r.Code-ne0 -or $r.StdErr){throw 'inbox 보상 mv 실패'}
-        $back=Get-AdoptionRemoteFile $path $Session
-        if(-not$back -or $back.Sha256-cne$Entry.Sha256){throw 'inbox 보상 최종 검증 실패'}
-    }finally{
-        # reserved 일반 삭제 보호를 우회하지 않고 이 함수가 만든 정확한 임시 파일만 정리.
-        $r=Invoke-Adb -s $Serial shell ('rm -f '+(Quote-Sh $temp))
-        if($r.Code-ne0 -or $r.StdErr){Write-Log ('ADOPTION RESTORE TEMP 보존: '+$temp)}
-    }
-}
-function Invoke-AdoptionWithCapabilityGate($Plan,$Context) {
-    $capability=Test-AdoptionPlanCapability $Plan
-    [void](New-AdoptionExecutorContext $Context.StateRoot $Context.SourceRoot $Context.Serial $Context.Systems)
-    if(-not$capability.Allowed){
-        Write-Log ('ADOPTION BLOCK: Dropbox destination does not allow required write operations; inbox preserved; normal sync continues / '+$capability.Result)
-        return [pscustomobject]@{Applied=$false;Status='Blocked';Capability=$capability;Journal=$null}
-    }
-    $journal=Invoke-UnregisteredAdoptionTransaction $Plan $Context
-    return [pscustomobject]@{Applied=$true;Status='Completed';Capability=$capability;Journal=$journal}
-}
-function Invoke-UnregisteredAdoptionTransaction($Plan,$Context) {
-    if(-not$Plan.Validated -or $Plan.Identity-cne$Context.Identity -or @($Plan.Entries).Count-eq0 -or @($Plan.Systems).Count-eq0){throw 'ADOPTION BLOCK: 검증되지 않은 plan'}
-    # prepare 후에도 미완료 journal을 다시 검사한다.
-
-    foreach($entry in $Plan.Entries){
-        $info=Get-UnregisteredAdoptionPath $entry.System $entry.InboxRelative $Context.Systems
-        if(-not[string]::Equals($entry.RelativePath,$info.DestinationRelativePath,[StringComparison]::OrdinalIgnoreCase) -or $entry.DropboxPath-cne(Join-Path (Join-Path (Join-Path $Context.SourceRoot 'roms') $entry.System) $entry.RelativePath)){throw 'adoption plan 경로 변조'}
-        if($entry.InboxPath-cne('/storage/emulated/0/ROMs/'+$entry.System+'/'+$entry.InboxRelative) -or $entry.AndroidPath-cne('/storage/emulated/0/ROMs/'+$entry.System+'/'+$entry.RelativePath)){throw 'ADOPTION BLOCK: remote plan 경로 변조'}
-        Assert-AdoptionDestinationPath $entry.DropboxPath $Context
-        if((Get-FileHash -LiteralPath $entry.StagedFile -Algorithm SHA256).Hash.ToLowerInvariant()-cne$entry.Sha256){throw 'adoption staged ROM 변경'}
-    }
-    $systems=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-    foreach($system in $Plan.Systems){
-        if($Context.Systems-cnotcontains$system.System -or -not$systems.Add($system.System) -or $system.DropboxGamelist-cne(Join-Path (Join-Path (Join-Path $Context.SourceRoot 'gamelists') $system.System) 'gamelist.xml') -or $system.AndroidPlan.System-cne$system.System){throw 'ADOPTION BLOCK: XML plan 범위 변조'}
-        Assert-AdoptionDestinationPath $system.DropboxGamelist $Context
-        if($system.SharedOutput){Assert-AdoptionFingerprint $system.SharedOutput $system.SharedHash}
-        if($system.AndroidPlan.Output){Assert-AdoptionFingerprint $system.AndroidPlan.Output $system.AndroidHash}
-    }
-    foreach($entry in $Plan.Entries){if(-not$systems.Contains($entry.System)){throw 'ADOPTION BLOCK: XML system plan 누락'}}
-    foreach($entry in $Plan.Entries){
-        Assert-AdoptionFingerprint $entry.DropboxPath $entry.DestinationHash
-        $source=Get-AdoptionRemoteFile $entry.InboxPath $Plan.Session
-        if(-not$source -or $source.Sha256-cne$entry.Sha256){throw 'ADOPTION BLOCK: source changed before journal'}
-    }
-    foreach($system in $Plan.Systems){
-        Assert-AdoptionFingerprint $system.DropboxGamelist $system.DropboxHash
-        Assert-GamelistSnapshot $system.AndroidPlan
-    }
-    $capability=Test-AdoptionPlanCapability $Plan
-    if(-not$capability.Allowed){
-        Write-Log ('ADOPTION BLOCK: Dropbox destination does not allow required write operations / '+$capability.Result+' / '+($capability.MissingCapabilities-join','))
-        throw 'ADOPTION BLOCK: Dropbox destination does not allow required write operations'
-    }
-    [void](New-AdoptionExecutorContext $Context.StateRoot $Context.SourceRoot $Context.Serial $Context.Systems)
-    [void][IO.Directory]::CreateDirectory($Context.JournalRoot)
-    $journal=[pscustomobject]@{sourceRestoreErrors=@();history=@();stagingPath=$Plan.Session;schemaVersion=1;identity=$Context.Identity;transactionId=[guid]::NewGuid().ToString('N');createdAt=[DateTimeOffset]::UtcNow.ToString('o');updatedAt='';state='staged';completed=$false;originalError='';entries=@($Plan.Entries|Select-Object System,InboxPath,RelativePath,Sha256,DropboxPath,AndroidPath,StagedFile,DestinationHash,AndroidDestinationHash);systemSnapshots=@($Plan.Systems|ForEach-Object {[pscustomobject]@{System=$_.System;DropboxHash=$_.DropboxHash;AndroidHash=$(if($_.AndroidPlan.Pulled){(Get-FileHash -LiteralPath $_.AndroidPlan.Pulled).Hash.ToLowerInvariant()}else{''})}})}
-    $journalFile=Join-Path $Context.JournalRoot ($journal.transactionId+'.json')
-    $save={param($state)$journal.state=$state;$journal.updatedAt=[DateTimeOffset]::UtcNow.ToString('o');$journal.history+=@([pscustomobject]@{state=$state;at=$journal.updatedAt});Write-MediaJson $journalFile $journal $Context.StateRoot}.GetNewClosure()
-    & $save 'staged'
-    $cleanupAttempted=$false
-    try{
-        foreach($entry in $Plan.Entries){
-            $source=Get-AdoptionRemoteFile $entry.InboxPath $Plan.Session
-            if(-not$source -or $source.Sha256-cne$entry.Sha256){throw 'adoption source hash 변경'}
-            Assert-AdoptionFingerprint $entry.DropboxPath $entry.DestinationHash
-        }
-        & $save 'source-verified'
-        foreach($entry in $Plan.Entries){
-            if(-not$entry.DestinationHash){Install-AdoptionDiskFile $entry.StagedFile $entry.DropboxPath '' $Context}
-        }
-        & $save 'dropbox-installed'
-        & $save 'gamelist-prepared'
-        foreach($system in $Plan.Systems){
-            Assert-AdoptionFingerprint $system.DropboxGamelist $system.DropboxHash
-            Assert-GamelistSnapshot $system.AndroidPlan
-            if($system.SharedOutput -and $system.DropboxHash){[IO.File]::Copy($system.DropboxGamelist,(Join-Path $Plan.Session ($system.System+'-master-backup.xml')),$false)}
-            if($system.SharedOutput){Install-AdoptionDiskFile $system.SharedOutput $system.DropboxGamelist $system.DropboxHash $Context $true}
-        }
-        & $save 'dropbox-gamelist-installed'
-        foreach($entry in $Plan.Entries){Install-AdoptionRemoteRom $entry $Plan.Session}
-        & $save 'android-rom-installed'
-        foreach($system in $Plan.Systems){Sync-GamelistSystem $system.AndroidPlan}
-        & $save 'android-gamelist-installed'
-        foreach($entry in $Plan.Entries){
-            Assert-AdoptionFingerprint $entry.DropboxPath $entry.Sha256
-            $final=Get-AdoptionRemoteFile $entry.AndroidPath $Plan.Session
-            if(-not$final -or $final.Sha256-cne$entry.Sha256){throw 'adoption canonical 최종 검증 실패'}
-        }
-        foreach($system in $Plan.Systems){
-            if($system.SharedOutput){Assert-AdoptionFingerprint $system.DropboxGamelist ((Get-FileHash -LiteralPath $system.SharedOutput).Hash.ToLowerInvariant())}
-            if($system.AndroidPlan.Output){
-                $check=Join-Path $Plan.Session ([guid]::NewGuid().ToString('N')+'.xml')
-                $r=Invoke-Adb -s $Serial pull $system.AndroidPlan.RemoteFile $check
-                if($r.Code-ne0){throw 'adoption final gamelist pull 실패'}
-                [void](Read-EsdeGamelist $check)
-                if((Get-FileHash -LiteralPath $check).Hash-cne(Get-FileHash -LiteralPath $system.AndroidPlan.Output).Hash){throw 'adoption final gamelist SHA 실패'}
-            }
-        }
-        # 모든 canonical/XML 검증 후에만 source cleanup. 다중 파일 삭제는 원자적이지 않음.
-        $cleanupAttempted=$true
-        foreach($entry in $Plan.Entries){Remove-AdoptionInboxSource $entry $Context $Plan.Session $true}
-        & $save 'android-source-removed'
-        $journal.completed=$true
-        & $save 'completed'
-    }catch{
-        $journal.completed=$false;$journal.originalError=$_.Exception.Message
-        if($cleanupAttempted){foreach($entry in $Plan.Entries){try{Restore-AdoptionInboxSource $entry $Context $Plan.Session}catch{$journal.sourceRestoreErrors+=@($_.Exception.Message);Write-Log ('ADOPTION FATAL: inbox 보상 실패; PC staging/canonical 보존: '+$_.Exception.Message)}}}
-        try{& $save 'failed'}catch{Write-Log ('ADOPTION JOURNAL SAVE FAILED: '+$_.Exception.Message)}
-        Write-Log ('ADOPTION BLOCK: 원본/생성된 canonical 및 journal 보존, 수동 검토 필요: '+$journal.originalError)
-        throw
-    }
-    return $journal
-}
-
 function Get-AndroidBoundGamelist($Master,$Android,[string]$System,[string[]]$PreservedUnmanagedPaths=@()) {
     $merged=Merge-EsdeGamelist $Master $Android {param($message)Write-Log ('GAMELIST WARNING: '+$message)} $PreservedUnmanagedPaths
     if($null-eq$merged){return $null}
@@ -1841,7 +1347,7 @@ else printf ABSENT; fi
     return ($r.StdOut-ceq'PRESENT')
 }
 
-function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmanagedPaths=@()) {
+function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmanagedPaths=@(),[switch]$PreserveNonMasterNodes,[switch]$SnapshotOnly) {
     $remote=$Job.RemotePath+'/gamelist.xml'
     Assert-RemotePath $remote
     $folder=Join-Path $Session ([guid]::NewGuid().ToString('N'))
@@ -1858,7 +1364,11 @@ function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmana
     }
     $entries=@(Get-LocalOnlyGameEntries $local {param($message)Write-Log ('GAMELIST WARNING: '+$message)})
     Write-Log ('GAMELIST '+$Job.System+': LOCAL-ONLY: '+$entries.Count+' _TEST: '+@($entries|Where-Object Class -eq LocalTest).Count+' _UNREGISTERED: '+@($entries|Where-Object Class -eq LocalUnregistered).Count)
-    $merged=Get-AndroidBoundGamelist $Job.GamelistSource $local $Job.System $PreservedUnmanagedPaths
+    if($PreserveNonMasterNodes){
+        $baseKeys=@(Get-EsdeGameEntries $Job.GamelistSource|ForEach-Object Key)
+        $PreservedUnmanagedPaths+=@(Get-EsdeGameEntries $local|Where-Object {$_.Class-eq'Managed' -and $baseKeys-cnotcontains$_.Key}|ForEach-Object Key)
+    }
+    $merged=$null; if(-not$SnapshotOnly){$merged=Get-AndroidBoundGamelist $Job.GamelistSource $local $Job.System $PreservedUnmanagedPaths}
     $output=$null
     if($merged){
         $output=Join-Path $folder 'merged.xml'
@@ -1866,7 +1376,7 @@ function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmana
         [void]@(Get-EsdeGameEntries (Read-EsdeGamelist $output))
         Write-Log ('GAMELIST '+$Job.System+': MERGE: created VALIDATION: pass')
     }
-    return [pscustomobject]@{System=$Job.System;RemotePath=$Job.RemotePath;RemoteFile=$remote;Present=$present;Output=$output;Pulled=$pulled;Validated=$true;LocalOnlyCount=$entries.Count;SourcePresent=[bool]$Job.GamelistSource;Local=$local;PreservedUnmanagedPaths=$PreservedUnmanagedPaths}
+    return [pscustomobject]@{System=$Job.System;RemotePath=$Job.RemotePath;RemoteFile=$remote;Present=$present;Output=$output;Pulled=$pulled;Validated=$true;LocalOnlyCount=$entries.Count;SourcePresent=[bool]$Job.GamelistSource;Local=$local;PreservedUnmanagedPaths=$PreservedUnmanagedPaths;ClassificationCommitted=$false}
 }
 
 function Assert-GamelistSnapshot($Plan) {
@@ -2322,34 +1832,33 @@ try {
     $mediaJobs=@($jobs|Where-Object {$_.Bucket.Local-eq'downloaded_media'})
     $mediaContext=New-MediaContext $StateDir $SourceRoot $Serial
     $mediaSources=@(Get-MediaSourceFiles $mediaJobs $mediaContext)
-    $adoptionContext=New-AdoptionExecutorContext $StateDir $SourceRoot $Serial $selectedSystems -DeferJournalGate
-    $romContext=New-RomPreservationContext $StateDir $SourceRoot $Serial
-
+    $classificationContext=New-ClassificationContext $StateDir $SourceRoot $Serial
     $esdeLifecycleStarted = $true
     Invoke-EsdeSync {
         $gamelistSession=Join-Path ([IO.Path]::GetTempPath()) ('ESDE-gamelist-'+[guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $gamelistSession)
         try {
         # ES-DE 종료 후 모든 Android XML을 pull/병합 검증해야 어떤 bucket의 변경도 시작한다.
-        $romPlans=@{}
-        foreach($job in $jobs){if($job.Bucket.Local-eq'roms'){$romPlans[$job.System]=Prepare-RomPreservationPlan $job $romContext}}
         $gamelistPlans=@{}
-        foreach($job in $jobs){if($job.Bucket.Local-eq'gamelists'){$gamelistPlans[$job.System]=Prepare-GamelistSystem $job $gamelistSession @($romPlans[$job.System].Unmanaged|ForEach-Object {'./'+$_})}}
-        $adoptions=@()
+        $classificationPlans=@()
         foreach($system in $selectedSystems){
             $romJob=@($jobs|Where-Object {$_.System-ceq$system -and $_.Bucket.Local-eq'roms'})[0]
             $xmlJob=@($jobs|Where-Object {$_.System-ceq$system -and $_.Bucket.Local-eq'gamelists'})[0]
-            $plan=Prepare-UnregisteredAdoptionSystem $romJob $xmlJob $gamelistPlans[$system] $adoptionContext $gamelistSession
-            if($plan){$adoptions+=$plan}
+            $xmlPlan=Prepare-GamelistSystem $xmlJob $gamelistSession -PreserveNonMasterNodes -SnapshotOnly
+            $plan=Prepare-ClassificationSystem $romJob $xmlJob $xmlPlan $gamelistSession
+            $classificationPlans+=$plan
+            $gamelistPlans[$system]=$plan.XmlPlan
         }
-        $mediaPlan=Prepare-MediaPlan $mediaJobs $mediaSources $mediaContext
-        if(-not$adoptions.Count){[void](New-AdoptionExecutorContext $StateDir $SourceRoot $Serial $selectedSystems)}
-        $adopted=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-        if($adoptions.Count){
-            $combined=[pscustomobject]@{Validated=$true;Identity=$adoptionContext.Identity;Entries=@($adoptions|ForEach-Object Entries);Systems=@($adoptions|ForEach-Object Systems);Session=$gamelistSession}
-            $outcome=Invoke-AdoptionWithCapabilityGate $combined $adoptionContext
-            if($outcome.Applied){foreach($p in $combined.Systems){[void]$adopted.Add($p.System)}}
-        }
+        # Flat media ownership와 local-only ROM의 연결은 미확정: 해당 system의 media 전체를 보존.
+        $protectedMedia=@($classificationPlans|Where-Object ProtectMedia|ForEach-Object System)
+        foreach($sys in $protectedMedia){Write-Log ('MEDIA LOCAL-ONLY PROTECT: '+$sys+' / relocation/flat naming policy unresolved, system media unchanged')}
+        $activeMediaJobs=@($mediaJobs|Where-Object {$protectedMedia-cnotcontains$_.System})
+        $activeMediaSources=@($mediaSources|Where-Object {$protectedMedia-cnotcontains$_.system})
+        $mediaPlan=Prepare-MediaPlan $activeMediaJobs $activeMediaSources $mediaContext
+        Invoke-ClassificationMoves $classificationPlans $classificationContext $gamelistSession
+        # 적용 후 재수집: 이전 inventory의 extra delete 목록은 절대 재사용하지 않는다.
+        foreach($plan in $classificationPlans){Confirm-ClassificationInventory $plan $gamelistSession}
+        foreach($plan in $classificationPlans){if(-not$plan.XmlPlan.ClassificationCommitted){Sync-GamelistSystem $plan.XmlPlan;$plan.XmlPlan.ClassificationCommitted=$true}}
         $mediaApplied=$false
         $i = 0
         foreach ($job in $jobs) {
@@ -2359,20 +1868,20 @@ try {
             Write-Log "PROCESS $label"
     
             if($job.Bucket.Local-eq'gamelists'){
-                if(-not$adopted.Contains($job.System)){Sync-GamelistSystem $gamelistPlans[$job.System]}
+                if(-not$gamelistPlans[$job.System].ClassificationCommitted){Sync-GamelistSystem $gamelistPlans[$job.System]}
             }
             elseif($job.Bucket.Local-eq'downloaded_media'){
                 if(-not$mediaApplied){Invoke-MediaTransaction $mediaPlan $mediaContext;$mediaApplied=$true}
             }
             elseif (Test-Path -LiteralPath $job.LocalPath) {
-                Sync-PreservedRomSystem $job $romPlans[$job.System] $romContext $label
+                Sync-ClassifiedManagedRom $job @($classificationPlans|Where-Object System -CEQ $job.System)[0] $label
             }
             else {
                 # The system is selected via ROMs, but this bucket has no corresponding folder in Dropbox.
                 # Within the selected-system scope, absence means the Android counterpart should also be absent.
                 if ($job.Bucket.Local -eq 'roms') {
                     Write-Log "  SOURCE ROM FOLDER ABSENT -> REMOVE MANAGED CONTENTS; PRESERVE RESERVED"
-                    Remove-ManagedRemoteContents $job.RemotePath
+                    throw 'CLASSIFICATION BLOCK: source ROM folder disappeared'
                 }
                 else {
                     Write-Log "  SOURCE SYSTEM FOLDER ABSENT -> VALIDATE LISTS AND REMOVE REMOTE SYSTEM FOLDER"
@@ -2384,8 +1893,8 @@ try {
         }
         } finally {
             try {
-                $incomplete=@();try{[void](New-AdoptionExecutorContext $StateDir $SourceRoot $Serial $selectedSystems)}catch{$incomplete=@($_)}
-                if($incomplete.Count){Write-Log ('ADOPTION STAGING PRESERVED: '+$gamelistSession)}
+                $incomplete=@();try{[void](New-ClassificationContext $StateDir $SourceRoot $Serial)}catch{$incomplete=@($_)}
+                if($incomplete.Count){Write-Log ('CLASSIFICATION STAGING PRESERVED: '+$gamelistSession)}
                 else{[IO.Directory]::Delete($gamelistSession,$true); Write-Log 'GAMELIST PC STAGING CLEANUP: pass'}
             }
             catch { Write-Log ('GAMELIST PC STAGING CLEANUP FAILED: '+$_.Exception.Message) }

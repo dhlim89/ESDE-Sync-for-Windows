@@ -294,39 +294,37 @@ v1.4.8에서 v1.4.9로 실제 앱 내 업데이트는 아직 실행하지 않았
 media rollback 범위는 media 전용이며 ROM/gamelist 전체 transaction 복원은 아닙니다.
 RC 준비는 정식 Release 게시가 아니며 승인 없이 main/tag/Release를 변경하지 않습니다.
 
-[v1.5.0 Stage 1 개발 — 정식 Release 아님]
-- 동일 managed path의 Android playcount/lastplayed/playtime만 tag 단위 보존. 기타 일반 metadata는 기존 Dropbox 기준.
-- game-level altemulator 변환 순수 함수/GB·GBC 확인 mapping 추가. top-level alternativeEmulator는 변경하지 않음.
-- _UNREGISTERED adoption은 경로/hash 계획과 삭제 gate만 존재. 실제 pull/Dropbox 채택/원본 삭제는 연결하지 않음.
-- 현재 _TEST/_UNREGISTERED ROM 보호, foreground, media ownership/journal, updater App 8개 계약 유지.
-- GUI client 740x670 / 96 DPI 기준 Dpi autoscale / 경로 4줄 84px / update y=316으로 겹침 해소.
-- channel=stable 및 숫자 releaseTag는 기존 validator의 패키지 계약이다. 개발 tree가 자동으로 공개되는 의미는 아니며 tag/Release 생성 없음.
-- 자세한 Stage 1 명세는 docs/v150-stage1-design.md. 미확정 사용자 preference 태그/다른 mapping은 추측하지 않음.
-[v1.5.0 Stage 2 개발 — 실환경 adoption 미실행]
-- Android-bound gamelist는 관리본 metadata와 Android runtime 3개 태그를 병합한 뒤 변환합니다.
-- Android system-level alternativeEmulator는 attributes/comments/children/empty를 포함한 전체 subtree를 보존합니다.
-- GB SameBoy (Standalone), GBC Sameboy (Standalone)만 My OldBoy! (Standalone)으로 변환합니다.
-- 확인된 arcade platform은 그대로 유지하며 neogeo 계열은 미확정 로그 후 변환을 생략합니다.
-- 일반 Android-only unmanaged ROM은 실제 ROM 목록을 기준으로 보존하고 XML node가 있을 때만 whole-node를 보존합니다.
-- 기존 Mirror-SystemFolder의 본문/공통 삭제는 그대로이며 호출 wrapper에서 unmanaged를 삭제 비교에서 제외합니다.
-- State/managed-rom-paths에는 성공적으로 동기화한 관리 경로를 기록해 이후 source 삭제의 관리 범위를 구분합니다.
-- 자동 채택은 선택 시스템의 root _UNREGISTERED inbox에만 적용하며 현재 검증된 ROM extension은 GB/GBC에 한정됩니다.
-- 전체 계획/충돌/정책 검증 후 journal → Dropbox ROM/XML → Android ROM/XML → 최종 검증 → inbox 삭제 순서입니다.
-- 공유 신규 game에는 Android runtime 3개 태그를 복제하지 않습니다. 기존 game이 없으면 ROM만 채택하며 game을 합성하지 않습니다.
-- preference/platform/media 공유가 필요하지만 미확정이면 mutation 전에 차단합니다.
-- source/Android XML fingerprint를 재확인하고 staging/검증/atomic replacement를 사용합니다.
-- State/adoption-transactions/<source-device identity>/ journal이 손상/미완료이면 새 mutation을 차단합니다.
-- 실패 시 생성한 canonical ROM/XML을 자동 삭제/rollback하지 않고 journal 및 PC staging을 보존합니다.
-- 마지막 cleanup/완료 기록 실패에는 이미 삭제한 inbox만 SHA 검증 복사본으로 보상합니다. 기존 canonical/XML과 다른 사용자 파일은 변경하지 않습니다.
-- 보상 전송도 실패하면 fatal 로그/journal과 PC 원본 복사본을 보존하고 수동 검토가 필요합니다. 자동 crash recovery/resume는 없습니다.
-- mock/fixture 시험만 수행했습니다. 실제 Android/Dropbox adoption, 설치 및 Stage 2 commit/push는 수행하지 않았습니다.
-- 자세한 transaction 경계/실기기 전제는 docs/v150-stage2-executor.md를 참조하십시오.
-[v1.5.0 Stage 3.1 개발 — 실제 재시험/abandon 미실행]
-- adoption plan별 Windows AccessCheck 기반 Dropbox capability 검사. 불가능/Unknown이면 journal 생성 전 차단.
-- 동일 SHA ROM reuse 및 XML unchanged에는 불필요한 쓰기 권한을 요구하지 않습니다.
-- worker는 capability 부족인 adoption만 건너뛰고 기존 Dropbox→Android 동기화를 계속합니다.
-- sibling staging/SHA/fingerprint/Move·Replace와 미완료 journal 차단은 유지합니다.
-- 읽기 전용 inspector와 명시적 승인/이유가 필요한 별도 abandon resolution을 추가했습니다.
-- 원본 journal은 수정/삭제하지 않으며 실제 실패 transaction은 이번에 abandon하지 않았습니다.
-- 지원되지 않는 ACL/상속/API, 누락 증거/unknown hash/손상 resolution은 fail closed입니다.
-- disk space/volume 검사와 abandon GUI는 미구현입니다. 자세한 범위는 docs/v150-stage31-capability-inspector.md를 참조하십시오.
+[v1.5.0 Stage 3 최종 local-only 정책 — 실환경 미실행]
+- Windows판 Dropbox 관리 라이브러리는 읽기 전용 SOURCE입니다. Android ROM을 Dropbox로 올리지 않습니다.
+- _TEST: 사용자가 직접 넣는 manual-only ROM. 앱은 scan/move/delete/overwrite에서 제외하고 보호합니다.
+- _UNREGISTERED: 앱이 일반 Android 영역의 비관리 ROM을 분류하여 옮기는 local-only 영역입니다.
+- 두 폴더는 이후 동일하게 ROM/gamelist/media 보호를 적용하며 다시 관리본으로 승격하지 않습니다.
+- 관리 여부는 ROM 파일의 canonical relative path와 SHA로 판단합니다. gamelist 존재 여부는 기준이 아닙니다.
+- same path+same SHA는 MANAGED, same path+different SHA는 MANAGED_CONFLICT입니다. conflict ROM은 보존하고 managed metadata/runtime/media 정책은 유지합니다.
+- different path+same SHA는 MANAGED_PATH_MISMATCH로 REVIEW합니다. save/state/media mapping이 unknown이면 자동 rename/delete/canonical 중복 복사를 하지 않습니다.
+- 관리본 경로/동일 SHA가 없고 검증된 ROM만 상대 하위 구조를 유지하여 _UNREGISTERED로 이동합니다.
+- destination ROM이 이미 있으면 SHA가 같아도 source를 삭제하지 않고 BLOCK합니다.
+- 기존 Android game은 whole-node를 유지하고 path만 변경합니다. 기존 node가 없으면 생성하지 않습니다.
+- destination game node 충돌은 자동 병합하지 않으며 ROM 없는 stale metadata도 삭제/이동하지 않습니다.
+- Managed metadata는 관리본 기준 + Android playcount/playtime/lastplayed(0/empty 포함) 보존 정책을 유지합니다.
+- Android alternativeEmulator subtree 보존과 GB/GBC game-level mapping도 유지합니다.
+- source validation → SAFE preflight → ES-DE stop → 전체 classification/XML/media 계획 검증 →
+  Android rename/SHA → gamelist verified transfer → inventory refresh → managed mirror → ES-DE restart.
+- 기존 mirror/공통 삭제 함수는 유지하며 관리 경로만 비교하도록 호출 범위를 제한합니다.
+- ROM/XML 실패는 자동 rollback하지 않습니다. State/android-classification의 최소 recovery-needed 기록을 보존하고 후속 작업을 차단합니다.
+- 기존 local-only 폴더가 있거나 새 분류가 있는 system은 media 파일 전체를 이번 sync에서 보존합니다.
+  flat media naming과 ROM 연결 정책이 미확정이므로 media relocation/삭제/덮어쓰기를 추측하지 않습니다.
+- 기존 Dropbox 쓰기 capability 및 채택 journal/resolution 기능은 제품에서 제거했습니다.
+- 과거 설계 문서는 docs/history에 기록으로 보존합니다. 현재 정책은 docs/v150-local-only-classification.md를 참조하십시오.
+- 현재 확인된 ROM extension catalog는 GB/GBC입니다. 다른 시스템 분류는 정책 확인 전 fail closed입니다.
+- 실제 monitor DPI 전환은 미검증이며 GUI 코드 변경은 없습니다.
+- 실제 Android/Dropbox 데이터와 이전 시험 ROM/journal/session은 변경하지 않았습니다. mutation 검증은 mock/fixture만이며 실제 GB/GBC는 read-only path/SHA 비교만 수행했습니다.
+[v1.5.0 ROM 분류 최종 정책]
+MANAGED: 같은 canonical path/SHA, 정상 관리 동기화.
+MANAGED_CONFLICT: Android ROM/save/state 보존, revision/patch 확인 warning. 관리본 gamelist/media 및 Android runtime 정책 유지.
+MANAGED_PATH_MISMATCH: 같은 내용으로 인정하지만 save/state/media mapping unknown이면 REVIEW. ROM만 rename하거나 canonical 복사본을 추가하지 않음.
+AMBIGUOUS: 같은 SHA의 관리본 후보가 여러 개이면 REVIEW.
+REVIEW가 있는 system은 ROM/XML/media 전체를 보류하며 로그에 이유를 남김.
+UNMANAGED: 일반 영역의 ROM을 _UNREGISTERED로 이동. 기존 game은 path만 변경하고 whole-node 보존. Dropbox write 없음.
+현재 실제 RetroArch/SameBoy save/state canonicalization mapping은 UNKNOWN이며 자동 정규화 executor는 연결하지 않음.
+.sav/.srm/.rtc/state sidecar는 ROM 분류·전송에서 제외하고 보존.

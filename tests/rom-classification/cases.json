@@ -1,0 +1,125 @@
+﻿[
+    {
+        "Expected":  "MANAGED",
+        "Name":  "A",
+        "Source":  [
+                       {
+                           "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                           "RelativePath":  "Foo.gb"
+                       }
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "RelativePath":  "Foo.gb"
+                        }
+                    ]
+    },
+    {
+        "Expected":  "MANAGED_CONFLICT",
+        "Name":  "B",
+        "Source":  [
+                       {
+                           "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                           "RelativePath":  "Foo.gb"
+                       }
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "RelativePath":  "Foo.gb"
+                        }
+                    ]
+    },
+    {
+        "Expected":  "MANAGED_PATH_MISMATCH",
+        "Name":  "C",
+        "Source":  [
+                       {
+                           "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                           "RelativePath":  "Foo.gb"
+                       }
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "RelativePath":  "Bar.gb"
+                        }
+                    ]
+    },
+    {
+        "Expected":  "UNMANAGED",
+        "Name":  "D",
+        "Source":  [
+                       {
+                           "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                           "RelativePath":  "Foo.gb"
+                       }
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "RelativePath":  "Bar.gb"
+                        }
+                    ]
+    },
+    {
+        "Expected":  "AMBIGUOUS",
+        "Name":  "E",
+        "Source":  [
+                       {
+                           "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                           "RelativePath":  "Foo.gb"
+                       },
+                       {
+                           "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                           "RelativePath":  "Copy.gb"
+                       }
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "RelativePath":  "Bar.gb"
+                        }
+                    ]
+    },
+    {
+        "Expected":  "LOCAL_ONLY",
+        "Name":  "F",
+        "Source":  [
+
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "RelativePath":  "_TEST/Foo.gb"
+                        }
+                    ]
+    },
+    {
+        "Expected":  "LOCAL_ONLY",
+        "Name":  "G",
+        "Source":  [
+
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "RelativePath":  "_UNREGISTERED/Foo.gb"
+                        }
+                    ]
+    },
+    {
+        "Expected":  "INVALID",
+        "Name":  "H",
+        "Source":  [
+
+                   ],
+        "Android":  [
+                        {
+                            "Sha256":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "RelativePath":  "../Foo.gb"
+                        }
+                    ]
+    }
+]
