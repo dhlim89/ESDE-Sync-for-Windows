@@ -86,7 +86,7 @@ RelativePath/AndroidRelativePath, Sha256/AndroidSha256, MatchedDropboxPaths, Mat
 관리본 ROM을 경로 dictionary와 SHA → paths[] index로 한 번 모은다. 비교는 전달된 hash index를 사용하며 ROM마다 source를 다시 hash하지 않는다.
 commit 직전 source 재hash는 cache 최적화보다 concurrent-change 검증을 우선하기 위한 별도 검사이다.
 source의 잘못된 경로/hash/case collision은 전체 source 검증 실패이다. Android INVALID는 진단 결과로 남고 executor 전에 차단된다.
-MANAGED는 warning 없음. CONFLICT는 ROM version/revision/patch 확인 warning과 PreserveRom 처리이다.
+MANAGED는 warning 없음. CONFLICT는 ROM version/revision/patch 확인 warning과 PRESERVE_AND_WARN 처리이다.
 LOCAL_ONLY/UNMANAGED는 whole-node 정책, REVIEW는 원본 그대로 보존한다.
 
 ## 실제 Retroid 읽기 전용 조사 (2026-10-09)
@@ -101,3 +101,31 @@ fixture의 known mapping은 가상 검증 자료이며 실제 emulator 지원 �
 
 ## 실환경 검증 checkpoint
 Stage 3.2 단일 UNMANAGED → LOCAL_ONLY 흐름은 PASS했다. 범위와 한계는 [실환경 검증](v150-stage3-runtime-validation.md)을 참조한다.
+
+## REVIEW/action 계약
+Classification은 콘텐츠/경로 판정이고 Action은 실행 의도이다.
+MANAGED → SYNC, MANAGED_CONFLICT → PRESERVE_AND_WARN,
+MANAGED_PATH_MISMATCH/AMBIGUOUS → REVIEW,
+UNMANAGED → MOVE_TO_UNREGISTERED, LOCAL_ONLY → PRESERVE, INVALID → BLOCK.
+UNMANAGED라도 destination collision 등 실행 gate 실패 시 Action은 BLOCK이다.
+
+Conflict는 파일 단위 ROM 전송/삭제/이동에서 제외한다.
+directory fast-push도 파일별 wrapper를 통하므로 conflict를 덮어쓰지 않는다.
+같은 system의 다른 managed ROM은 계속 처리한다.
+관리본 metadata/media와 Android runtime3/alternativeEmulator/altemulator 정책은 유지한다.
+local-only media 보호 때문에 system media를 보류하는 독립 조건은 그대로이다.
+
+PATH_MISMATCH는 동일 managed content의 존재 증거이다.
+현재 mapping UNKNOWN이므로 system ROM/XML/media 전체 REVIEW로 보류하여
+canonical 추가 push/ROM-only rename/추측 save/state/media 변경을 막는다.
+AMBIGUOUS도 system 전체 보류이며 모든 후보 경로를 보존한다.
+이는 안전한 per-file media 연결을 입증하지 못한 현재 architecture의 보수적 경계이다.
+
+Get-RomClassificationNotice/Write-RomClassificationNotice는 한국어 안내와
+system/path/managed SHA/Android SHA/action/canonical 및 SHA 후보 경로만 기록한다.
+ROM bytes는 기록하지 않는다.
+Get-RomReviewSummary는 ManagedCount/UnmanagedMoveCount/ReviewCount,
+NoMutationReviewCount 및 classification+reason별 집계와 항목 안내를 반환한다.
+Conflict warning도 ReviewCount에 포함하지만 no-mutation REVIEW와 구분한다.
+이번 stage에서는 summary를 GUI/status 계약에 연결하지 않고 fixture만 검증한다.
+현재 GUI는 worker status message와 sync.log를 읽으므로 이후 연결 가능하다.

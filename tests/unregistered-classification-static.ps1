@@ -13,16 +13,16 @@ foreach($case in $fixture){
  Check ($null-ne$p[0].Reason -and $null-ne$p[0].AndroidRelativePath -and $null-ne$p[0].AndroidSha256) ($case.Name+' 진단 fields')
 }
 $p=@(New-UnregisteredClassificationPlan gb @(Row 'a.gb') @(Row 'a.gb' ('b'*64)) @() @('gb'))
-Check ($p[0].Action-ceq'PreserveRom' -and $p[0].Reason-like'*version/revision/patch*') 'conflict warning/move job 없음'
+Check ($p[0].Action-ceq'PRESERVE_AND_WARN' -and $p[0].Reason-like'*version/revision/patch*') 'conflict warning/move job 없음'
 $p=@(New-UnregisteredClassificationPlan gb @() @(Row 'Hacks/foo.gb') @() @('gb'))
 Check ($p[0].DestinationRelativePath-ceq'_UNREGISTERED/Hacks/foo.gb') 'nested 구조 유지'
 foreach($path in @('../escape.gb','/storage/a.gb','C:\a.gb','CON.gb','a?.gb','a./foo.gb','a//foo.gb','foo.exe')){
  $p=@(New-UnregisteredClassificationPlan gb @() @(Row $path) @() @('gb'))
- Check ($p[0].Classification-ceq'INVALID' -and $p[0].Action-ceq'Block') ($path+' INVALID')
+ Check ($p[0].Classification-ceq'INVALID' -and $p[0].Action-ceq'BLOCK') ($path+' INVALID')
 }
 foreach($sha in @(('a'*64),('b'*64))){
  $p=@(New-UnregisteredClassificationPlan gb @() @(Row 'foo.gb') @(Row '_UNREGISTERED/foo.gb' $sha) @('gb'))
- Check ($p[0].Action-ceq'Block' -and $p[0].Classification-ceq'UNMANAGED') 'destination collision source cleanup 없음'
+ Check ($p[0].Action-ceq'BLOCK' -and $p[0].Classification-ceq'UNMANAGED') 'destination collision source cleanup 없음'
 }
 $p=@(New-UnregisteredClassificationPlan gb @() @((Row 'foo.gb'),(Row 'FOO.gb')) @() @('gb'))
 Check ($p[1].Classification-ceq'INVALID') 'Android case collision'

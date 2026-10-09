@@ -328,3 +328,13 @@ REVIEW가 있는 system은 ROM/XML/media 전체를 보류하며 로그에 이유
 UNMANAGED: 일반 영역의 ROM을 _UNREGISTERED로 이동. 기존 game은 path만 변경하고 whole-node 보존. Dropbox write 없음.
 현재 실제 RetroArch/SameBoy save/state canonicalization mapping은 UNKNOWN이며 자동 정규화 executor는 연결하지 않음.
 .sav/.srm/.rtc/state sidecar는 ROM 분류·전송에서 제외하고 보존.
+[v1.5.0 REVIEW 안내]
+Classification과 Action을 분리합니다.
+MANAGED=SYNC, MANAGED_CONFLICT=PRESERVE_AND_WARN,
+MANAGED_PATH_MISMATCH/AMBIGUOUS=REVIEW, UNMANAGED=MOVE_TO_UNREGISTERED,
+LOCAL_ONLY=PRESERVE, INVALID=BLOCK.
+Conflict ROM은 파일 단위로 보호하며 다른 managed ROM은 계속 처리합니다.
+ROM revision/version/patch 확인 안내와 두 SHA를 로그에 기록합니다.
+현재 PathMismatch/Ambiguous system은 ROM/XML/media 전체를 보류하여 중복 생성과
+save/state 이름 변경을 방지합니다. 실제 mapping은 아직 UNKNOWN입니다.
+ReviewCount와 이유별/항목별 summary는 fixture로 검증했으며 GUI redesign은 하지 않습니다.

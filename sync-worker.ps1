@@ -942,34 +942,34 @@ function New-UnregisteredClassificationPlan([string]$System,[object[]]$Source,[o
     }
     $plan=@()
     foreach($row in $Android){
-        $result=[pscustomobject]@{System=$System;RelativePath=$row.RelativePath;AndroidRelativePath=$row.RelativePath;Sha256=$row.Sha256;AndroidSha256=$row.Sha256;MatchedDropboxPaths=@();MatchedShaPaths=@();Classification='INVALID';Status='INVALID';Reason='';Action='Block';DestinationRelativePath=$null}
+        $result=[pscustomobject]@{System=$System;RelativePath=$row.RelativePath;AndroidRelativePath=$row.RelativePath;Sha256=$row.Sha256;AndroidSha256=$row.Sha256;ManagedSha256=$null;MatchedDropboxPaths=@();MatchedShaPaths=@();Classification='INVALID';Status='INVALID';Reason='';Action='BLOCK';DestinationRelativePath=$null}
         try{$relative=Get-ClassificationRelativePath $System $row.RelativePath $Systems}catch{
             if(Is-LocalOnlyRelativePath $row.RelativePath){
                 # Local-only still requires a valid XML/path shape before being protected.
                 $info=Get-EsdeGamePathInfo $row.RelativePath
-                if($info.Class-ne'Invalid'){$result.Classification='LOCAL_ONLY';$result.Status='LOCAL_ONLY';$result.Action='Preserve';$result.Reason='local-only folder';$plan+=$result;continue}
+                if($info.Class-ne'Invalid'){$result.Classification='LOCAL_ONLY';$result.Status='LOCAL_ONLY';$result.Action='PRESERVE';$result.Reason='local-only folder';$plan+=$result;continue}
             }
             $result.Reason=$_.Exception.Message;$plan+=$result;continue
         }
         if(Is-LocalOnlyRelativePath $row.RelativePath){
-            $result.Classification='LOCAL_ONLY';$result.Status='LOCAL_ONLY';$result.Action='Preserve';$result.Reason='local-only folder';$plan+=$result;continue
+            $result.Classification='LOCAL_ONLY';$result.Status='LOCAL_ONLY';$result.Action='PRESERVE';$result.Reason='local-only folder';$plan+=$result;continue
         }
         if(-not$seen.Add($relative)){$result.Reason='Android case collision';$plan+=$result;continue}
         if($row.Sha256-cnotmatch'^[a-f0-9]{64}$'){$result.Reason='Android hash unknown';$plan+=$result;continue}
         if([IO.Path]::GetExtension($relative).ToLowerInvariant()-cnotin(Get-ClassificationExtensions $System)){$result.Reason='invalid ROM extension';$plan+=$result;continue}
-        if($managed.ContainsKey($relative)){$result.MatchedDropboxPaths=@($managed[$relative].RelativePath)}
+        if($managed.ContainsKey($relative)){$result.MatchedDropboxPaths=@($managed[$relative].RelativePath);$result.ManagedSha256=$managed[$relative].Sha256}
         if($index.Hashes.ContainsKey($row.Sha256)){$result.MatchedShaPaths=@($index.Hashes[$row.Sha256])}
-        if($result.MatchedShaPaths.Count-gt1){$result.Classification='AMBIGUOUS';$result.Action='Review';$result.Reason='multiple managed SHA candidates'}
+        if($result.MatchedShaPaths.Count-gt1){$result.Classification='AMBIGUOUS';$result.Action='REVIEW';$result.Reason='multiple managed SHA candidates'}
         elseif($managed.ContainsKey($relative) -and $managed[$relative].RelativePath-ceq$relative){
-            if($managed[$relative].Sha256-ceq$row.Sha256){$result.Classification='MANAGED';$result.Action='None';$result.Reason='canonical path and SHA match'}
-            else{$result.Classification='MANAGED_CONFLICT';$result.Action='PreserveRom';$result.Reason='ROM version/revision/patch requires review; managed metadata remains applicable'}
+            if($managed[$relative].Sha256-ceq$row.Sha256){$result.Classification='MANAGED';$result.Action='SYNC';$result.Reason='canonical path and SHA match'}
+            else{$result.Classification='MANAGED_CONFLICT';$result.Action='PRESERVE_AND_WARN';$result.Reason='ROM version/revision/patch requires review; managed metadata remains applicable'}
         }
-        elseif($result.MatchedShaPaths.Count-eq1){$result.Classification='MANAGED_PATH_MISMATCH';$result.Action='Review';$result.Reason='save/state/media canonicalization mapping not verified'}
-        elseif($managed.ContainsKey($relative)){$result.Classification='AMBIGUOUS';$result.Action='Review';$result.Reason='case-insensitive canonical path collision'}
+        elseif($result.MatchedShaPaths.Count-eq1){$result.Classification='MANAGED_PATH_MISMATCH';$result.Action='REVIEW';$result.Reason='save/state/media canonicalization mapping not verified'}
+        elseif($managed.ContainsKey($relative)){$result.Classification='AMBIGUOUS';$result.Action='REVIEW';$result.Reason='case-insensitive canonical path collision'}
         else{
-            $result.Classification='UNMANAGED';$result.Action='Move';$result.Reason='no managed path or SHA match';$result.DestinationRelativePath='_UNREGISTERED/'+$relative
+            $result.Classification='UNMANAGED';$result.Action='MOVE_TO_UNREGISTERED';$result.Reason='no managed path or SHA match';$result.DestinationRelativePath='_UNREGISTERED/'+$relative
             if($dest.ContainsKey($result.DestinationRelativePath)){
-                $result.Action='Block';$result.Reason=if($dest[$result.DestinationRelativePath].Sha256-ceq$row.Sha256){'DESTINATION_DUPLICATE_BLOCK'}else{'DESTINATION_COLLISION'}
+                $result.Action='BLOCK';$result.Reason=if($dest[$result.DestinationRelativePath].Sha256-ceq$row.Sha256){'DESTINATION_DUPLICATE_BLOCK'}else{'DESTINATION_COLLISION'}
             }
         }
         $result.Status=$result.Classification;$plan+=$result
@@ -993,6 +993,39 @@ function New-ManagedRomShaIndex([string]$System,[object[]]$Source,[string[]]$Sys
         $hashes[$row.Sha256]=@($hashes[$row.Sha256])+@($relative)
     }
     return [pscustomobject]@{System=$System;Paths=$paths;Hashes=$hashes}
+}
+
+function Get-RomClassificationNotice($Entry) {
+    $message=switch($Entry.Classification){
+        'MANAGED_CONFLICT' {'관리 라이브러리와 기기의 ROM 파일명이 같지만 파일 내용이 다릅니다. 기기의 ROM은 보존하며 덮어쓰거나 이동하지 않습니다. 게임 버전, 리비전, 번역/패치 여부를 확인해 주세요.'}
+        'MANAGED_PATH_MISMATCH' {'기기에 관리 라이브러리와 내용이 같은 ROM이 있지만 파일 이름 또는 경로가 다릅니다. 중복 ROM은 생성하지 않습니다. 세이브/상태 파일 연결을 보호하기 위해 자동 이름 변경을 수행하지 않습니다.'}
+        'AMBIGUOUS' {'정확한 관리 ROM 대응 경로를 결정할 수 없습니다. 같은 내용의 후보가 여러 개이거나 경로 대응이 모호하여 자동 변경을 수행하지 않습니다. 관리 후보 경로를 확인해 주세요.'}
+        default {''}
+    }
+    $canonical=if(@($Entry.MatchedDropboxPaths).Count){@($Entry.MatchedDropboxPaths)}else{@($Entry.MatchedShaPaths)}
+    return [pscustomobject]@{System=$Entry.System;RelativePath=$Entry.RelativePath;Classification=$Entry.Classification;Action=$Entry.Action;ManagedSha256=$Entry.ManagedSha256;AndroidSha256=$Entry.AndroidSha256;CanonicalPaths=@($canonical);ShaCandidates=@($Entry.MatchedShaPaths);Reason=$Entry.Reason;Message=$message}
+}
+
+function Write-RomClassificationNotice($Entry) {
+    $notice=Get-RomClassificationNotice $Entry
+    if($notice.Message){
+        Write-Log ('ROM WARNING: '+$notice.Classification+' '+$notice.System+'/'+$notice.RelativePath+' action='+$notice.Action+' managedSHA='+$notice.ManagedSha256+' androidSHA='+$notice.AndroidSha256+' canonical='+($notice.CanonicalPaths -join ',')+' SHA-candidates='+($notice.ShaCandidates -join ',')+' / '+$notice.Message)
+    }
+}
+
+function Get-RomReviewSummary([object[]]$Entries) {
+    # UI-independent proposal. Do not change GUI/status contracts in this stage.
+    $items=@($Entries|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS')}|ForEach-Object {Get-RomClassificationNotice $_})
+    $reasons=@($items|Group-Object Classification,Reason|ForEach-Object {[pscustomobject]@{ReasonCode=$_.Group[0].Classification;Reason=$_.Group[0].Reason;Count=$_.Count}})
+    return [pscustomobject]@{
+        ManagedCount=@($Entries|Where-Object Classification -CEQ MANAGED).Count
+        ManagedConflictCount=@($Entries|Where-Object Classification -CEQ MANAGED_CONFLICT).Count
+        UnmanagedMoveCount=@($Entries|Where-Object Action -CEQ MOVE_TO_UNREGISTERED).Count
+        LocalOnlyCount=@($Entries|Where-Object Classification -CEQ LOCAL_ONLY).Count
+        ReviewCount=$items.Count
+        NoMutationReviewCount=@($Entries|Where-Object Action -CEQ REVIEW).Count
+        Reasons=$reasons;Items=$items
+    }
 }
 
 function New-ManagedCanonicalizationPlan($Classification,$Mapping,[object[]]$Bindings,[string[]]$ExistingPaths,[string[]]$ExistingGamePaths=@()) {
@@ -1087,13 +1120,13 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
         if($destination){$destinations+=[pscustomobject]@{RelativePath=('_UNREGISTERED/'+$row.RelativePath);Sha256=$destination.Sha256}}
     }
     $classification=@(New-UnregisteredClassificationPlan $RomJob.System $source $android $destinations $selectedSystems)
-    $blocked=@($classification|Where-Object Action -CEQ Block)
+    $blocked=@($classification|Where-Object Action -CEQ BLOCK)
     if($blocked.Count){throw ('CLASSIFICATION BLOCK: '+(($blocked|ForEach-Object {$_.RelativePath+': '+$_.Reason}) -join '; '))}
-    $review=@($classification|Where-Object Action -CEQ Review).Count-gt0
+    $review=@($classification|Where-Object Action -CEQ REVIEW).Count-gt0
     foreach($entry in @($classification|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS')})){
-        Write-Log ('ROM WARNING: '+$entry.Classification+' '+$RomJob.System+'/'+$entry.RelativePath+' / '+$entry.Reason)
+        Write-RomClassificationNotice $entry
     }
-    $moves=@($classification|Where-Object Action -EQ Move)
+    $moves=@($classification|Where-Object Action -EQ MOVE_TO_UNREGISTERED)
     if($review){$moves=@();Write-Log ('ROM REVIEW: '+$RomJob.System+' ROM/XML/media 모두 보존; canonical 중복 전송 없음')}
     $local=if($XmlPlan.Local){ConvertFrom-EsdeGamelistBytes $XmlPlan.Local.Bytes}else{$null}
     $existing=@(Get-EsdeGameEntries $local)
@@ -1189,9 +1222,9 @@ function Confirm-ClassificationInventory($Plan,[string]$Session) {
     Assert-ClassificationSourceSnapshot $Plan
     $rows=@(Get-ClassificationAndroidRows $Plan.RomJob $Session)
     $refresh=@(New-UnregisteredClassificationPlan $Plan.System $Plan.Source $rows @() $selectedSystems)
-    if(@($refresh|Where-Object Action -EQ Move).Count){throw 'CLASSIFICATION BLOCK: new unmanaged ROM after prepared inventory'}
-    if(@($refresh|Where-Object Action -CEQ Block).Count){throw 'CLASSIFICATION BLOCK: invalid refreshed inventory'}
-    $expected=@($Plan.Inventory|Where-Object {$_.Action-cne'Move' -and $_.Classification-cne'LOCAL_ONLY'}|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification|ConvertTo-Json -Compress)
+    if(@($refresh|Where-Object Action -EQ MOVE_TO_UNREGISTERED).Count){throw 'CLASSIFICATION BLOCK: new unmanaged ROM after prepared inventory'}
+    if(@($refresh|Where-Object Action -CEQ BLOCK).Count){throw 'CLASSIFICATION BLOCK: invalid refreshed inventory'}
+    $expected=@($Plan.Inventory|Where-Object {$_.Action-cne'MOVE_TO_UNREGISTERED' -and $_.Classification-cne'LOCAL_ONLY'}|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification|ConvertTo-Json -Compress)
     $actual=@($refresh|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification|ConvertTo-Json -Compress)
     if(($expected -join '')-cne($actual -join '')){throw 'CLASSIFICATION BLOCK: ROM inventory changed after prepare'}
 }
