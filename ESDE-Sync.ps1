@@ -41,6 +41,7 @@ function Format-SyncCompletionMessage($Summary) {
         ('로컬 전용: '+[int]$Summary.LocalOnlyCount)
         ('확인 필요: '+[int]$Summary.ReviewCount)
     )
+    if([int]$Summary.PromotedCount-gt0){$lines=@($lines[0..3])+@(('관리 ROM 승격: '+[int]$Summary.PromotedCount))+@($lines[4..5])}
     if([int]$Summary.ReviewCount-gt0){
         $lines+=@('','확인 필요 항목')
         foreach($item in @($Summary.Items|Select-Object -First 5)){

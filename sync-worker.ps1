@@ -1040,6 +1040,376 @@ function New-ManagedRomShaIndex([string]$System,[object[]]$Source,[string[]]$Sys
     return [pscustomobject]@{System=$System;Paths=$paths;Hashes=$hashes}
 }
 
+function New-SameNamePromotionProposal($Entry,[object[]]$AndroidInventory,[string[]]$AndroidGamePaths,[string[]]$MasterGamePaths,$SafetyEvidence) {
+    # Pure Stage 1 proposal only. Not connected to worker mutation or summary.
+    $proposal=[pscustomobject]@{Classification=$Entry.Classification;Action=$Entry.Action;SafePromotionEligible=$false;Reason='not a local-only managed match';SourceRelativePath=$Entry.RelativePath;CanonicalRelativePath=$null;System=$Entry.System;Operations=@();MediaAction='ReviewSystem';SaveStateAction='Preserve';RuntimeTags=@('playcount','playtime','lastplayed')}
+    if($Entry.Classification-cne'LOCAL_ONLY_MANAGED_MATCH'){return $proposal}
+    $proposal.Action='PRESERVE_AND_REVIEW'
+    $info=Get-EsdeGamePathInfo $Entry.RelativePath
+    if($info.Class-cne'LocalUnregistered' -or -not$Entry.RelativePath.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal)){$proposal.Reason='_TEST or non-root reserved folder remains manual/local-only';return $proposal}
+    $candidates=@($Entry.MatchedShaPaths)
+    if($candidates.Count-ne1){$proposal.Reason='canonical candidate not unique';return $proposal}
+    $canonical=$candidates[0];$proposal.CanonicalRelativePath=$canonical
+    if((Get-RomClassificationCapability $Entry.System).Status-cne'Supported'){$proposal.Reason='classification unsupported';return $proposal}
+    try{$canonical=Get-ClassificationRelativePath $Entry.System $canonical @($Entry.System)}catch{$proposal.Reason='canonical path invalid';return $proposal}
+    $relative=$info.Key.Substring(2).Substring('_UNREGISTERED/'.Length)
+    if($relative-cne$canonical){$proposal.Reason='reserved-relative-path differs; basename alone is insufficient';return $proposal}
+    if($Entry.AndroidSha256-cnotmatch'^[a-f0-9]{64}$' -or $Entry.AndroidSha256-cne$Entry.ManagedSha256){$proposal.Reason='hash evidence mismatch';return $proposal}
+    $source=@($AndroidInventory|Where-Object RelativePath -CEQ $Entry.RelativePath)
+    if($source.Count-ne1 -or $source[0].Sha256-cne$Entry.AndroidSha256){$proposal.Reason='source changed or missing';return $proposal}
+    if(@($AndroidInventory|Where-Object {$_.RelativePath-ieq$canonical}).Count){$proposal.Reason='canonical destination exists/case collision; no duplicate cleanup';return $proposal}
+    $sourceKey='./'+$Entry.RelativePath;$canonicalKey='./'+$canonical
+    if(@($AndroidGamePaths|Where-Object {$_-ieq$canonicalKey}).Count -or @($AndroidGamePaths|Where-Object {$_-ceq$sourceKey}).Count-gt1){$proposal.Reason='Android game path collision';return $proposal}
+    if(@($MasterGamePaths|Where-Object {$_-ceq$canonicalKey}).Count-gt1){$proposal.Reason='master game path collision';return $proposal}
+    if(@($AndroidGamePaths|Where-Object {$_-ceq$sourceKey}).Count -and @($MasterGamePaths|Where-Object {$_-ceq$canonicalKey}).Count-ne1){$proposal.Reason='runtime merge target missing';return $proposal}
+    if(-not$SafetyEvidence -or $SafetyEvidence.Verified-ne$true -or $SafetyEvidence.System-cne$Entry.System -or $SafetyEvidence.PathIndependentSaveState-ne$true -or $SafetyEvidence.NoMediaRelocationRequired-ne$true -or $SafetyEvidence.LocalMetadataResolved-ne$true -or $SafetyEvidence.SafeDestinationParent-ne$true -or [string]::IsNullOrWhiteSpace($SafetyEvidence.Reference)){$proposal.Reason='save/state/path/metadata evidence unresolved';return $proposal}
+    $proposal.SafePromotionEligible=$true;$proposal.Action='PROMOTE_TO_MANAGED';$proposal.Reason='verified same reserved-relative-path and content'
+    $proposal.Operations=@([pscustomobject]@{Kind='RomMove';From=$Entry.RelativePath;To=$canonical;Sha256=$Entry.AndroidSha256},[pscustomobject]@{Kind='ExistingManagedMerge';LocalPath=$sourceKey;CanonicalPath=$canonicalKey;SyntheticLocalNode=$false})
+    return $proposal
+}
+function Get-PromotionMetadataSafety($Android,$Master,[string]$SourceKey,[string]$CanonicalKey) {
+    $result=[pscustomobject]@{Safe=$false;Category='INVALID/COLLISION';Reason='invalid path';UnsupportedTags=@();UnsupportedAttributes=@();Collision=$false;HasLocalNode=$false;HasManagedNode=$false}
+    if((Get-EsdeGamePathInfo $SourceKey).Class-cne'LocalUnregistered' -or (Get-EsdeGamePathInfo $CanonicalKey).Class-cne'Managed'){return $result}
+    $locals=@(Get-EsdeGameEntries $Android);$masters=@(Get-EsdeGameEntries $Master)
+    $local=@($locals|Where-Object Key -CEQ $SourceKey);$managed=@($masters|Where-Object Key -CEQ $CanonicalKey)
+    $result.HasLocalNode=$local.Count-gt0;$result.HasManagedNode=$managed.Count-gt0
+    if($local.Count-gt1 -or $managed.Count-gt1 -or @($locals|Where-Object {$_.Key-ieq$CanonicalKey}).Count){$result.Collision=$true;$result.Reason='duplicate/canonical game collision';return $result}
+    if($local.Count-eq0){$result.Safe=$true;$result.Category='SAFE-MERGEABLE';$result.Reason='no local node; normal master policy';return $result}
+    if($managed.Count-ne1){$result.Reason='managed runtime merge destination missing';return $result}
+    $known=@('path','name','desc','rating','releasedate','developer','publisher','genre','players','image','thumbnail','video','marquee','manual','titlescreen','fanart','boxart','boxback','box3d','physicalmedia','miximage','altemulator','playcount','playtime','lastplayed')
+    $tags=@();$attrs=@();$comments=$false;$duplicate=$false;$seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($attr in $local[0].Node.Attributes){$attrs+='game/@'+$attr.Name}
+    foreach($node in $local[0].Node.ChildNodes){
+        if($node.NodeType-eq'Comment'){$comments=$true;continue}
+        if($node.NodeType-in@('Whitespace','SignificantWhitespace')){continue}
+        if($node.NodeType-ne'Element'){$tags+='#'+$node.NodeType;continue}
+        if(-not$seen.Add($node.Name)){$duplicate=$true}
+        if($node.Name-cnotin$known){$tags+=$node.Name}
+        foreach($attr in $node.Attributes){$attrs+=$node.Name+'/@'+$attr.Name}
+        foreach($child in $node.ChildNodes){if($child.NodeType-eq'Comment'){$comments=$true}elseif($child.NodeType-cnotin@('Text','CDATA','Whitespace','SignificantWhitespace')){$tags+=$node.Name+'/'+$child.Name}}
+    }
+    $result.UnsupportedTags=$tags;$result.UnsupportedAttributes=$attrs
+    if($duplicate){$result.Collision=$true;$result.Reason='duplicate child tag';return $result}
+    if($tags.Count-or$attrs.Count-or$comments){$result.Category='LOCAL-EXTRA-METADATA';$result.Reason='unknown/preference/custom attributes/comments would be lost';return $result}
+    $result.Safe=$true;$result.Category='SAFE-MERGEABLE';$result.Reason='known managed-authoritative fields and runtime only';return $result
+}
+
+function Get-PromotionBoundGamelist($Android,$Master,[string]$System,[string]$SourceKey,[string]$CanonicalKey) {
+    $safety=Get-PromotionMetadataSafety $Android $Master $SourceKey $CanonicalKey
+    if(-not$safety.Safe){throw ('PROMOTION REVIEW: '+$safety.Reason)}
+    $copy=if($Android){ConvertFrom-EsdeGamelistBytes $Android.Bytes}else{$null}
+    $entry=@(Get-EsdeGameEntries $copy|Where-Object Key -CEQ $SourceKey)
+    if($entry.Count){$entry[0].Node.SelectSingleNode('path').InnerText=$CanonicalKey;$copy.Bytes=ConvertTo-EsdeGamelistBytes $copy}
+    return Get-AndroidBoundGamelist $Master $copy $System
+}
+
+function Invoke-VerifiedAndroidRomMoveCore($Move,$IO) {
+    # No real ADB backend in Stage 1.2. Policy direction belongs to transaction caller.
+    if($IO.Mode-cnotin@('Mock','Adb')){throw 'PROMOTION BLOCK: invalid adapter'}
+    if($Move.System-cnotmatch'^[a-zA-Z0-9_-]+$' -or $Move.System-in@('_TEST','_UNREGISTERED')){throw 'MOVE BLOCK: system'}
+    $root='/storage/emulated/0/ROMs/'+$Move.System
+    $relative=@($Move.SourceRelativePath,$Move.DestinationRelativePath)
+    foreach($path in $relative){
+        $info=Get-EsdeGamePathInfo $path
+        if($info.Class-ceq'Invalid' -or $info.Key.Substring(2)-cne$path){throw 'MOVE BLOCK: normalized path'}
+        $normal=$path
+        if($info.Class-cne'Managed'){
+            if($path.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal)){$normal=$path.Substring(14)}
+            elseif($path.StartsWith('_TEST/',[StringComparison]::Ordinal)){$normal=$path.Substring(6)}
+            else{throw 'MOVE BLOCK: nested reserved path'}
+        }
+        [void](Get-ClassificationRelativePath $Move.System $normal @($Move.System))
+    }
+    if($relative[0]-ieq$relative[1] -or $Move.ExpectedSha256-cnotmatch'^[a-f0-9]{64}$' -or $Move.InitialSourceSha256-cne$Move.ExpectedSha256 -or $Move.DestinationExpectedAbsent-ne$true){throw 'MOVE BLOCK: evidence'}
+    $source=$root+'/'+$relative[0];$destination=$root+'/'+$relative[1]
+    $parent=$destination.Substring(0,$destination.LastIndexOf('/'))
+    $src=& $IO.Stat $source;$dst=& $IO.Stat $destination
+    if(-not$src.Exists -or $src.Kind-cne'File' -or $src.IsLink -or $src.Sha256-cne$Move.ExpectedSha256 -or $dst.Exists -or $dst.IsLink){throw 'MOVE BLOCK: source/destination'}
+    $sourceParent=$source.Substring(0,$source.LastIndexOf('/'))
+    $sp=& $IO.Parent $root $sourceParent $false
+    if(-not$sp.Safe -or -not$sp.Exists -or $sp.Kind-cne'Directory' -or $sp.CanonicalPath-cne$sourceParent -or $sp.Device-cne$src.Device){throw 'MOVE BLOCK: source parent link/containment'}
+    $p=& $IO.Parent $root $parent $false
+    if(-not$p.Safe -or $p.Kind-cne'Directory' -or $p.CanonicalPath-cne$parent -or $p.Device-cne$src.Device){throw 'MOVE BLOCK: parent containment/link/filesystem'}
+    [void](& $IO.Parent $root $parent $true)
+    $p=& $IO.Parent $root $parent $false
+    $src=& $IO.Stat $source;$dst=& $IO.Stat $destination
+    if(-not$p.Safe -or -not$p.Exists -or $p.Kind-cne'Directory' -or $p.CanonicalPath-cne$parent -or $p.Device-cne$src.Device -or $src.Kind-cne'File' -or -not$src.Exists -or $src.Sha256-cne$Move.ExpectedSha256 -or $src.IsLink -or $dst.Exists -or $dst.IsLink){throw 'MOVE BLOCK: late revision/parent/destination'}
+    [void](& $IO.Record 'moving' $Move)
+    [void](& $IO.MoveNoClobber $source $destination)
+    $src=& $IO.Stat $source;$dst=& $IO.Stat $destination
+    if($src.Exists -or -not$dst.Exists -or $dst.IsLink -or $dst.Sha256-cne$Move.ExpectedSha256){throw 'MOVE RECOVERY NEEDED: final verification'}
+    [void](& $IO.Record 'rom-verified' $Move)
+    return [pscustomobject]@{Source=$source;Destination=$destination;Sha256=$dst.Sha256;Completed=$true}
+}
+
+function Invoke-SameNamePromotionMock($Proposal,$MetadataSafety,$IO,$PreparedXml,[string]$GamelistFingerprint) {
+    if($IO.Mode-cne'Mock' -or -not$Proposal.SafePromotionEligible -or $Proposal.Action-cne'PROMOTE_TO_MANAGED' -or -not$MetadataSafety.Safe){throw 'PROMOTION BLOCK: plan/metadata/mock gate'}
+    if(-not$Proposal.SourceRelativePath.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal) -or $Proposal.SourceRelativePath.Substring(14)-cne$Proposal.CanonicalRelativePath){throw 'PROMOTION BLOCK: policy direction'}
+    $op=@($Proposal.Operations|Where-Object Kind -CEQ RomMove)
+    if($op.Count-ne1){throw 'PROMOTION BLOCK: move operation'}
+    $move=[pscustomobject]@{System=$Proposal.System;SourceRelativePath=$Proposal.SourceRelativePath;DestinationRelativePath=$Proposal.CanonicalRelativePath;ExpectedSha256=$op[0].Sha256;InitialSourceSha256=$op[0].Sha256;DestinationExpectedAbsent=$true;GamelistAction='CANONICALIZE_AND_MERGE';MediaAction='HOLD';SaveAction='PRESERVE';StateAction='PRESERVE'}
+    if($op[0].From-cne$move.SourceRelativePath -or $op[0].To-cne$move.DestinationRelativePath){throw 'PROMOTION BLOCK: operation tampered'}
+    [void](& $IO.ValidateXml $PreparedXml)
+    if((& $IO.GamelistFingerprint)-cne$GamelistFingerprint){throw 'PROMOTION BLOCK: initial XML concurrent modification'}
+    [void](& $IO.Record 'prepared' $move)
+    try{
+        $result=Invoke-VerifiedAndroidRomMoveMock $move $IO
+        if((& $IO.GamelistFingerprint)-cne$GamelistFingerprint){throw 'PROMOTION RECOVERY NEEDED: XML concurrent modification'}
+        [void](& $IO.CommitXml $PreparedXml $GamelistFingerprint)
+        [void](& $IO.Record 'completed' $move)
+        return $result
+    }catch{
+        [void](& $IO.Record 'recovery-needed' $move)
+        throw
+    }
+}
+
+function Get-PromotionSummaryProposal([object[]]$StartEntries,[int]$CompletedPromotions) {
+    # UI/status writer unchanged; proposal contract only.
+    if($CompletedPromotions-lt0){throw 'promotion count invalid'}
+    $summary=Get-RomReviewSummary $StartEntries
+    $eligible=@($StartEntries|Where-Object Action -CEQ PROMOTE_TO_MANAGED).Count
+    if($CompletedPromotions-gt$eligible){throw 'promotion count exceeds plans'}
+    $summary.Items=@($summary.Items|Where-Object Action -CNE PROMOTE_TO_MANAGED)
+    $summary.ReviewCount=$summary.Items.Count
+    $summary.Reasons=@($summary.Items|Group-Object Classification,Reason|ForEach-Object {[pscustomobject]@{ReasonCode=$_.Group[0].Classification;Reason=$_.Group[0].Reason;Count=$_.Count}})
+    $summary.PromotedCount=$CompletedPromotions
+    return $summary
+}
+function Invoke-VerifiedAndroidRomMoveMock($Move,$IO) {
+    if($IO.Mode-cne'Mock'){throw 'PROMOTION BLOCK: mock adapter required'}
+    return Invoke-VerifiedAndroidRomMoveCore $Move $IO
+}
+
+function Invoke-PromotionShell([string]$Command) {
+    $r=Invoke-Adb -s $Serial shell $Command
+    if($r.Code-ne0 -or $r.StdErr){throw ('PROMOTION BLOCK: ADB shell failure '+$r.Code+' '+$r.StdErr)}
+    return $r.StdOut
+}
+
+function Get-VerifiedRomParent([string]$Root,[string]$Parent,[bool]$Create) {
+    if($Root-cnotmatch'^/storage/emulated/0/ROMs/[a-zA-Z0-9_-]+$' -or ($Parent-cne$Root -and -not$Parent.StartsWith($Root+'/',[StringComparison]::Ordinal))){throw 'PROMOTION BLOCK: parent scope'}
+    $suffix=if($Parent-ceq$Root){''}else{$Parent.Substring($Root.Length+1)}
+    foreach($segment in @($suffix.Split('/')|Where-Object {$_})){if($segment-in@('.','..') -or (Get-EsdeGamePathInfo $segment).Class-ceq'Invalid'){throw 'PROMOTION BLOCK: parent segment'}}
+    $chain=@('/storage/emulated/0/ROMs',$Root)
+    $current=$Root
+    foreach($segment in @($suffix.Split('/')|Where-Object {$_})){$current+='/'+$segment;$chain+=$current}
+    $device=$null;$missing=$false
+    foreach($path in $chain){
+        $q=Quote-Sh $path
+        $status=Invoke-PromotionShell ('if [ -L '+$q+' ]; then printf LINK; elif [ -d '+$q+' ]; then printf DIR; elif [ -e '+$q+' ]; then printf OTHER; else printf ABSENT; fi')
+        if($status-cnotin@('DIR','ABSENT') -or ($path-ceq$Root -and $status-ceq'ABSENT') -or ($path-ceq'/storage/emulated/0/ROMs' -and $status-ceq'ABSENT')){throw 'PROMOTION BLOCK: parent kind/link/root'}
+        if($path-cne'/storage/emulated/0/ROMs'){
+            $parentPath=$path.Substring(0,$path.LastIndexOf('/'));$name=$path.Substring($path.LastIndexOf('/')+1)
+            if(-not$missing){
+                $listing=Invoke-PromotionShell ('find '+(Quote-Sh $parentPath)+' -mindepth 1 -maxdepth 1 -print0')
+                if($listing -and -not$listing.EndsWith([string][char]0)){throw 'PROMOTION BLOCK: parent listing format'}
+                $matches=@($listing-split'\x00'|Where-Object {$_}|Where-Object {if(-not$_.StartsWith($parentPath+'/',[StringComparison]::Ordinal)){throw 'PROMOTION BLOCK: parent list scope'};$_.Substring($parentPath.Length+1)-ieq$name})
+                if($matches.Count-gt1 -or ($matches.Count-eq1 -and $matches[0]-cne$path)){throw 'PROMOTION BLOCK: parent case collision'}
+            }
+        }
+        if($status-ceq'ABSENT'){
+            $missing=$true
+            if(-not$Create){continue}
+            $answer=Invoke-PromotionShell ('mkdir '+$q)
+            if($answer){throw 'PROMOTION BLOCK: unexpected mkdir output'}
+            $status=Invoke-PromotionShell ('if [ -L '+$q+' ] || [ ! -d '+$q+' ]; then exit 1; fi; printf DIR')
+            if($status-cne'DIR'){throw 'PROMOTION BLOCK: parent recheck format'}
+            $missing=$false
+        }
+        $canonical=(Invoke-PromotionShell ('readlink -f '+$q)).TrimEnd([char]13,[char]10)
+        if($canonical-cne$path){throw 'PROMOTION BLOCK: canonical parent redirect'}
+        $d=(Invoke-PromotionShell ('stat -c %d '+$q)).TrimEnd([char]13,[char]10)
+        if($d-cnotmatch'^\d+$' -or ($device -and $device-cne$d)){throw 'PROMOTION BLOCK: parent filesystem'}
+        $device=$d
+    }
+    return [pscustomobject]@{Safe=$true;Exists=(-not$missing -or $Create);Kind='Directory';CanonicalPath=$Parent;Device=$device}
+}
+
+function Assert-PromotionFileCase([string]$Path) {
+    Assert-RemotePath $Path
+    $parent=$Path.Substring(0,$Path.LastIndexOf('/'));$name=$Path.Substring($Path.LastIndexOf('/')+1)
+    $status=Invoke-PromotionShell ('if [ -d '+(Quote-Sh $parent)+' ]; then printf DIR; else printf ABSENT; fi')
+    if($status-ceq'ABSENT'){return}
+    if($status-cne'DIR'){throw 'PROMOTION BLOCK: file parent format'}
+    $listing=Invoke-PromotionShell ('find '+(Quote-Sh $parent)+' -mindepth 1 -maxdepth 1 -print0')
+    if($listing -and -not$listing.EndsWith([string][char]0)){throw 'PROMOTION BLOCK: file case listing format'}
+    $paths=@($listing-split'\x00'|Where-Object {$_}|Where-Object {if(-not$_.StartsWith($parent+'/',[StringComparison]::Ordinal)){throw 'PROMOTION BLOCK: file case list scope'};$_.Substring($parent.Length+1)-ieq$name})
+    if($paths.Count-gt1 -or ($paths.Count-eq1 -and $paths[0]-cne$Path)){throw 'PROMOTION BLOCK: filename case collision'}
+}
+function New-PromotionAdbAdapter([string]$Session,[scriptblock]$EvidenceRecorder) {
+    $stat={param($path)
+        Assert-PromotionFileCase $path
+        $row=Read-ClassificationRom $path $Session
+        if(-not$row){return [pscustomobject]@{Exists=$false;IsLink=$false;Kind='File';Sha256=$null;Device=$null}}
+        $device=(Invoke-PromotionShell ('stat -c %d '+(Quote-Sh $path))).TrimEnd([char]13,[char]10)
+        if($device-cnotmatch'^\d+$'){throw 'PROMOTION BLOCK: file device unknown'}
+        return [pscustomobject]@{Exists=$true;IsLink=$false;Kind='File';Sha256=$row.Sha256;Device=$device}
+    }.GetNewClosure()
+    $parentReader={param($root,$parent,$create)if($create -and $EvidenceRecorder){[void](& $EvidenceRecorder 'parent-attempt' ([pscustomobject]@{Parent=$parent}))};Get-VerifiedRomParent $root $parent $create}.GetNewClosure()
+    $record={param($phase,$move)Write-Log ('PROMOTION MOVE: '+$phase+' '+$move.System+'/'+$move.SourceRelativePath+' -> '+$move.DestinationRelativePath);if($EvidenceRecorder){[void](& $EvidenceRecorder $phase $move)}}.GetNewClosure()
+    return [pscustomobject]@{Mode='Adb';Stat=$stat;Parent=$parentReader;MoveNoClobber={param($src,$dst)
+        $systemRoot=[regex]::Match($src,'^/storage/emulated/0/ROMs/[^/]+').Value
+    if(-not$systemRoot -or -not$dst.StartsWith($systemRoot+'/',[StringComparison]::Ordinal)){throw 'PROMOTION BLOCK: atomic guard scope'}
+    $guardPaths=@('/storage/emulated/0/ROMs',$systemRoot)
+    foreach($file in @($src,$dst)){
+        $parentPath=$file.Substring(0,$file.LastIndexOf('/'))
+        $current=$systemRoot
+        foreach($part in @($parentPath.Substring($systemRoot.Length).TrimStart('/').Split('/')|Where-Object {$_})){$current+='/'+$part;$guardPaths+=$current}
+    }
+    $guards=(@($guardPaths|Sort-Object -Unique|ForEach-Object {'[ -L '+(Quote-Sh $_)+' ] || [ ! -d '+(Quote-Sh $_)+' ]'}) -join ' || ')
+    $out=Invoke-PromotionShell ('if '+$guards+' || [ -L '+(Quote-Sh $src)+' ] || [ ! -f '+(Quote-Sh $src)+' ] || [ -e '+(Quote-Sh $dst)+' ] || [ -L '+(Quote-Sh $dst)+' ]; then exit 1; fi; mv -n '+(Quote-Sh $src)+' '+(Quote-Sh $dst))
+        if($out){throw 'PROMOTION RECOVERY NEEDED: unexpected mv output'}
+    };Record=$record}
+}
+
+function Invoke-VerifiedAndroidRomMove($Move,[string]$Session,[scriptblock]$EvidenceRecorder) {
+    if((Get-RomClassificationCapability $Move.System).Status-cne'Supported'){throw 'PROMOTION BLOCK: unsupported system'}
+    if(-not$Move.SourceRelativePath.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal) -or $Move.SourceRelativePath.Substring(14)-cne$Move.DestinationRelativePath -or (Get-EsdeGamePathInfo $Move.DestinationRelativePath).Class-cne'Managed'){throw 'PROMOTION BLOCK: direction/relative path'}
+    return Invoke-VerifiedAndroidRomMoveCore $Move (New-PromotionAdbAdapter $Session $EvidenceRecorder)
+}
+
+function Get-PromotionEnvironmentEvidence([string]$System,$Android,$Master,[string]$CanonicalKey) {
+    $none=[pscustomobject]@{Verified=$false;System=$System;Reference='SameBoy environment not confirmed'}
+    if($Serial-cne'7b67d4e2' -or $System-cnotin@('gb','gbc')){return $none}
+    $node=@(Get-EsdeGameEntries $Master|Where-Object Key -CEQ $CanonicalKey)
+    if($node.Count-gt1){return $none}
+    if($node.Count -and $node[0].Node.SelectSingleNode('altemulator') -and $node[0].Node.SelectSingleNode('altemulator').InnerText-cne'SameBoy'){return $none}
+    $localNode=@(Get-EsdeGameEntries $Android|Where-Object Key -CEQ ('./_UNREGISTERED/'+$CanonicalKey.Substring(2)))
+    if($localNode.Count -and $localNode[0].Node.SelectSingleNode('altemulator') -and $localNode[0].Node.SelectSingleNode('altemulator').InnerText-cne'SameBoy'){return $none}
+    $alternative=if($Android){$Android.Document.DocumentElement.SelectSingleNode('alternativeEmulator/label')}
+    if(-not$alternative -or $alternative.InnerText-cne'SameBoy'){return $none}
+    try{
+        $running=Invoke-PromotionShell 'if pidof com.retroarch.aarch64 >/dev/null; then printf RUNNING; else printf STOPPED; fi'
+        if($running-cne'STOPPED'){return $none}
+        $config='/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg'
+        $hash=(Invoke-PromotionShell ('sha256sum '+(Quote-Sh $config))).TrimEnd([char]13,[char]10)
+        $expected='b224183630dd375291bd67c605d31ce247dc3b7fe78aa4e2361cf82fd4fae111'
+        if($hash-cne($expected+'  '+$config)){return $none}
+        $overrides=Invoke-PromotionShell "find '/storage/emulated/0/RetroArch/config' -type f -iname '*.cfg' -print"
+        $links=Invoke-PromotionShell "find '/storage/emulated/0/RetroArch/config' -type l -print"
+        if($overrides -or $links){return $none}
+        return [pscustomobject]@{Verified=$true;System=$System;PathIndependentSaveState=$true;NoMediaRelocationRequired=$true;LocalMetadataResolved=$true;SafeDestinationParent=$true;Reference='Stage1.1 Retroid 7b67d4e2 SameBoy exact config';ConfigSha256=$expected}
+    }catch{Write-Log ('PROMOTION REVIEW: environment query unknown '+$_.Exception.Message);return $none}
+}
+
+function Get-PromotionXmlEvidence($Local,$Master,[string]$SourceKey,[string]$CanonicalKey) {
+    $localNode=@(Get-EsdeGameEntries $Local|Where-Object Key -CEQ $SourceKey)
+    $masterNode=@(Get-EsdeGameEntries $Master|Where-Object Key -CEQ $CanonicalKey)
+    return [pscustomobject]@{AndroidSha256=$(if($Local){Get-MediaTextHash ([Convert]::ToBase64String($Local.Bytes))}else{'ABSENT'});MasterSha256=$(if($Master){Get-MediaTextHash ([Convert]::ToBase64String($Master.Bytes))}else{'ABSENT'});LocalNodeSha256=$(if($localNode.Count-eq1){Get-MediaTextHash $localNode[0].Node.OuterXml}else{'ABSENT'});MasterNodeSha256=$(if($masterNode.Count-eq1){Get-MediaTextHash $masterNode[0].Node.OuterXml}else{'ABSENT'})}
+}
+
+function Assert-PromotionEvidence($Plan,[string]$Session) {
+    Assert-ClassificationSourceSnapshot $Plan
+    Assert-PromotionGamelistSnapshot $Plan.XmlPlan
+    if($Plan.XmlPlan.Output -and (Get-FileHash $Plan.XmlPlan.Output).Hash-cne$Plan.PreparedXmlSha){throw 'PROMOTION BLOCK: staged XML changed'}
+    if($Plan.MasterPath -and (Test-Path -LiteralPath $Plan.MasterPath)){Assert-LocalSourcePath $Plan.MasterPath $SourceRoot}
+    $master=if($Plan.MasterPath -and (Test-Path -LiteralPath $Plan.MasterPath)){Read-EsdeGamelist $Plan.MasterPath}else{$null}
+    $local=if($Plan.XmlPlan.Present){Read-EsdeGamelist $Plan.XmlPlan.Pulled}else{$null}
+    foreach($promotion in $Plan.Promotions){
+        $e=Get-PromotionXmlEvidence $local $master ('./'+$promotion.SourceRelativePath) ('./'+$promotion.CanonicalRelativePath)
+        if(($e|ConvertTo-Json -Compress)-cne($promotion.XmlEvidence|ConvertTo-Json -Compress)){throw 'PROMOTION BLOCK: XML/node evidence changed'}
+        $safe=Get-PromotionMetadataSafety $local $master ('./'+$promotion.SourceRelativePath) ('./'+$promotion.CanonicalRelativePath)
+        if(-not$safe.Safe){throw 'PROMOTION BLOCK: metadata revalidation'}
+        $environment=Get-PromotionEnvironmentEvidence $Plan.System $local $master ('./'+$promotion.CanonicalRelativePath)
+        if(-not$environment.Verified -or $environment.ConfigSha256-cne$promotion.Environment.ConfigSha256){throw 'PROMOTION BLOCK: environment changed'}
+    }
+}
+
+function Test-PromotionAdbResult($Reply,[string[]]$Arguments) {
+    if($Reply.Code-ne0){return $false}
+    if($Arguments.Count-lt5 -or $Arguments[2]-cnotin@('push','pull')){return -not[bool]$Reply.StdErr}
+    if(-not$Reply.StdErr -and -not$Reply.StdOut){return $true}
+    $source=$Arguments[3];$verb=if($Arguments[2]-ceq'push'){'pushed'}else{'pulled'}
+    $ack='^'+[regex]::Escape($source)+': 1 file '+$verb+', 0 skipped\.(?: [0-9.]+ [KMGT]?B/s \([0-9]+ bytes in [0-9.]+s\))?$'
+    $acks=0
+    foreach($stream in @($Reply.StdOut,$Reply.StdErr)){
+        foreach($line in @($stream-split'[\r\n]+'|Where-Object {$_})){
+            if($line-cmatch$ack){$acks++;continue}
+            if($line-cmatch('^\[\s*\d{1,3}%\] '+[regex]::Escape($source)+': \d{1,3}%$')){continue}
+            return $false
+        }
+    }
+    return $acks-eq1
+}
+function Assert-PromotionGamelistSnapshot($Plan) {
+    $adb=(Get-Item Function:Invoke-Adb).ScriptBlock
+    $strict={param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+        $r=& $adb @Args
+        if(-not(Test-PromotionAdbResult $r $Args)){throw ('PROMOTION BLOCK: snapshot ADB failure '+$r.Code+' '+$r.StdErr)}
+        return $r
+    }.GetNewClosure()
+    Set-Item Function:local:Invoke-Adb -Value $strict
+    Assert-GamelistSnapshot $Plan
+}
+function Sync-PromotionGamelist($Plan) {
+    $adb=(Get-Item Function:Invoke-Adb).ScriptBlock
+    $strict={param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+        $r=& $adb @Args
+        if(-not(Test-PromotionAdbResult $r $Args)){throw ('PROMOTION RECOVERY NEEDED: XML ADB failure '+$r.Code+' '+$r.StdErr)}
+        return $r
+    }.GetNewClosure()
+    Set-Item Function:local:Invoke-Adb -Value $strict
+    Sync-GamelistSystem $Plan
+}
+function Invoke-ClassificationPromotions([object[]]$Plans,$Context,[string]$Session) {
+    $guard=New-ClassificationContext $Context.StateRoot $Context.SourceRoot $Context.Serial
+    if($guard.File-cne$Context.File -or $Context.Serial-cne$Serial){throw 'PROMOTION BLOCK: state/device context'}
+    # All mixed classification moves commit one staged XML per system; no reverse move.
+    foreach($plan in $Plans){if(-not$plan.Validated){throw 'PROMOTION BLOCK: plan'};if($plan.Promotions.Count){Assert-PromotionEvidence $plan $Session}else{Assert-ClassificationSourceSnapshot $plan;Assert-GamelistSnapshot $plan.XmlPlan}}
+    $transaction=[guid]::NewGuid().ToString('N')
+    $archive=Join-Path (Join-Path $Context.StateRoot 'android-classification-history') ($transaction+'.json')
+    $state=[pscustomobject]@{schemaVersion=1;identity=$Context.Identity;transactionId=$transaction;status='prepared';at=[DateTimeOffset]::UtcNow.ToString('o');moves=@();parentAttempts=@();error='';staging=$Session}
+    foreach($plan in $Plans){foreach($p in $plan.Promotions){$state.moves+=[pscustomobject]@{System=$plan.System;SourceRelativePath=$p.SourceRelativePath;DestinationRelativePath=$p.CanonicalRelativePath;ExpectedSha256=$p.Operations[0].Sha256;InitialSourceSha256=$p.Operations[0].Sha256;DestinationExpectedAbsent=$true;GamelistAction='CANONICALIZE_AND_MERGE';MediaAction='HOLD';SaveAction='PRESERVE';StateAction='PRESERVE';XmlEvidence=$p.XmlEvidence}}}
+    $recorder={param($phase,$item)
+        if($phase-ceq'parent-attempt'){$state.parentAttempts+=@($item.Parent)}
+        if($phase-ceq'rom-verified'){$state.status='rom_moved'}
+        Write-MediaJson $Context.File $state $Context.StateRoot
+        Write-MediaJson $archive $state $Context.StateRoot
+    }.GetNewClosure()
+    foreach($plan in $Plans){foreach($move in $plan.Moves){$state.moves+=[pscustomobject]@{System=$plan.System;SourceRelativePath=$move.RelativePath;DestinationRelativePath=$move.DestinationRelativePath;ExpectedSha256=$move.Sha256;InitialSourceSha256=$move.Sha256;DestinationExpectedAbsent=$true;GamelistAction='PRESERVE_AND_MOVE_PATH';MediaAction='HOLD';SaveAction='PRESERVE';StateAction='PRESERVE'}}}
+    if(Test-Path -LiteralPath $archive){throw 'PROMOTION BLOCK: history collision'}
+    [void](Assert-MediaDiskPath $archive $Context.StateRoot)
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Context.File))
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $archive))
+    Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
+    try{
+        foreach($plan in $Plans){
+            foreach($move in $plan.Moves){
+                $normal=Get-ClassificationRelativePath $plan.System $move.RelativePath $selectedSystems
+                if($move.DestinationRelativePath-cne('_UNREGISTERED/'+$normal)){throw 'CLASSIFICATION BLOCK: move policy'}
+                $e=[pscustomobject]@{System=$plan.System;SourceRelativePath=$normal;DestinationRelativePath=$move.DestinationRelativePath;ExpectedSha256=$move.Sha256;InitialSourceSha256=$move.Sha256;DestinationExpectedAbsent=$true}
+                [void](Invoke-VerifiedAndroidRomMoveCore $e (New-PromotionAdbAdapter $Session $recorder))
+            }
+            foreach($promotion in $plan.Promotions){
+                Assert-PromotionEvidence $plan $Session
+                $e=@($state.moves|Where-Object {$_.System-ceq$plan.System -and $_.SourceRelativePath-ceq$promotion.SourceRelativePath})[0]
+                [void](Invoke-VerifiedAndroidRomMove $e $Session $recorder)
+                $state.status='rom_moved';Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
+                Assert-PromotionEvidence $plan $Session
+            }
+            if($plan.Moves.Count -or $plan.Promotions.Count){
+                if($plan.Promotions.Count){Assert-PromotionEvidence $plan $Session}
+                Sync-PromotionGamelist $plan.XmlPlan
+                if($plan.XmlPlan.Output){
+                    $back=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-promotion-final.xml')
+                    $r=Invoke-Adb -s $Serial pull $plan.XmlPlan.RemoteFile $back
+                    if(-not(Test-PromotionAdbResult $r @('-s',$Serial,'pull',$plan.XmlPlan.RemoteFile,$back)) -or (Get-FileHash $back).Hash-cne$plan.PreparedXmlSha){throw 'PROMOTION RECOVERY NEEDED: final XML SHA'}
+                    [void](Read-EsdeGamelist $back)
+                }
+                $currentMaster=if(Test-Path -LiteralPath $plan.MasterPath){Read-EsdeGamelist $plan.MasterPath}else{$null}
+                foreach($promotion in $plan.Promotions){
+                    $current=Get-PromotionXmlEvidence $plan.XmlPlan.Local $currentMaster ('./'+$promotion.SourceRelativePath) ('./'+$promotion.CanonicalRelativePath)
+                    if($current.MasterSha256-cne$promotion.XmlEvidence.MasterSha256 -or $current.MasterNodeSha256-cne$promotion.XmlEvidence.MasterNodeSha256){throw 'PROMOTION RECOVERY NEEDED: master changed during XML commit'}
+                }
+                $plan.XmlPlan.ClassificationCommitted=$true;$plan.CompletedPromotions=$plan.Promotions.Count
+                $state.status='xml_committed';Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
+            }
+            Confirm-ClassificationInventory $plan $Session
+        }
+        $state.status='completed';Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
+    }catch{$state.status='recovery-needed';$state.error=$_.Exception.Message;Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot;throw}
+}
 function Get-RomClassificationNotice($Entry) {
     $message=switch($Entry.Classification){
         'LOCAL_ONLY_MANAGED_MATCH' {'로컬 전용 ROM과 동일한 ROM이 관리 라이브러리에 추가되었습니다. 기기의 ROM은 보존하고 중복 생성을 막기 위해 관리본 전송을 보류했습니다. 세이브/상태 파일 보호를 위해 자동 이름 변경은 수행하지 않았습니다.'}
@@ -1063,9 +1433,10 @@ function Get-RomReviewSummary([object[]]$Entries) {
     # 시작 시 Supported 분류 결과만 집계한다. 이동 후 재분류로 중복 집계하지 않는다.
     $Entries=@($Entries|Where-Object {(Get-RomClassificationCapability $_.System).Status-ceq'Supported'})
     # UI-independent proposal. Do not change GUI/status contracts in this stage.
-    $items=@($Entries|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS','LOCAL_ONLY_MANAGED_MATCH')}|ForEach-Object {Get-RomClassificationNotice $_})
+    $items=@($Entries|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS','LOCAL_ONLY_MANAGED_MATCH') -and $_.Action-cne'PROMOTE_TO_MANAGED'}|ForEach-Object {Get-RomClassificationNotice $_})
     $reasons=@($items|Group-Object Classification,Reason|ForEach-Object {[pscustomobject]@{ReasonCode=$_.Group[0].Classification;Reason=$_.Group[0].Reason;Count=$_.Count}})
     return [pscustomobject]@{
+        PromotedCount=0
         ManagedCount=@($Entries|Where-Object Classification -CEQ MANAGED).Count
         ManagedConflictCount=@($Entries|Where-Object Classification -CEQ MANAGED_CONFLICT).Count
         UnmanagedMoveCount=@($Entries|Where-Object Action -CEQ MOVE_TO_UNREGISTERED).Count
@@ -1208,6 +1579,28 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
     $classification=@(New-UnregisteredClassificationPlan $RomJob.System $source $android $destinations $selectedSystems)
     $blocked=@($classification|Where-Object Action -CEQ BLOCK)
     if($blocked.Count){throw ('CLASSIFICATION BLOCK: '+(($blocked|ForEach-Object {$_.RelativePath+': '+$_.Reason}) -join '; '))}
+    $promotions=@()
+    $initialLocal=if($XmlPlan.Local){ConvertFrom-EsdeGamelistBytes $XmlPlan.Local.Bytes}else{$null}
+    $masterOriginal=$XmlJob.GamelistSource
+    foreach($entry in @($classification|Where-Object Classification -CEQ LOCAL_ONLY_MANAGED_MATCH)){
+        $canonical=@($entry.MatchedShaPaths)[0]
+        if(-not$entry.RelativePath.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal) -or $entry.RelativePath.Substring(14)-cne$canonical){continue}
+        if(@($android|Where-Object {$_.RelativePath-ieq$canonical}).Count){continue}
+        $safety=Get-PromotionMetadataSafety $initialLocal $masterOriginal ('./'+$entry.RelativePath) ('./'+$canonical)
+        if($safety.Category-ceq'INVALID/COLLISION'){throw ('PROMOTION BLOCK: '+$safety.Reason)}
+        if(-not$safety.Safe){continue}
+        $environment=Get-PromotionEnvironmentEvidence $RomJob.System $initialLocal $masterOriginal ('./'+$canonical)
+        if(-not$environment.Verified){continue}
+        $parent=($RomJob.RemotePath+'/'+$canonical);$parent=$parent.Substring(0,$parent.LastIndexOf('/'))
+        [void](Get-VerifiedRomParent $RomJob.RemotePath $parent $false)
+        $proposal=New-SameNamePromotionProposal $entry $android @(Get-EsdeGameEntries $initialLocal|ForEach-Object Key) @(Get-EsdeGameEntries $masterOriginal|ForEach-Object Key) $environment
+        if($proposal.SafePromotionEligible){
+            $proposal|Add-Member XmlEvidence (Get-PromotionXmlEvidence $initialLocal $masterOriginal ('./'+$entry.RelativePath) ('./'+$canonical))
+            $proposal|Add-Member Environment $environment
+            $promotions+=$proposal;$entry.Action='PROMOTE_TO_MANAGED'
+            Write-Log ('PROMOTION PLAN: '+$RomJob.System+'/'+$entry.RelativePath+' -> '+$canonical+' media=HOLD save/state=PRESERVE')
+        }
+    }
     $review=@($classification|Where-Object {$_.Action-in@('REVIEW','PRESERVE_AND_REVIEW')}).Count-gt0
     foreach($entry in @($classification|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS','LOCAL_ONLY_MANAGED_MATCH')})){
         Write-RomClassificationNotice $entry
@@ -1226,16 +1619,21 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
         $move|Add-Member SourcePath ($RomJob.RemotePath+'/'+$move.RelativePath)
         $move|Add-Member DestinationPath ($RomJob.RemotePath+'/'+$move.DestinationRelativePath)
     }
+    foreach($promotion in $promotions){
+        $nodes=@(Get-EsdeGameEntries $local|Where-Object Key -CEQ ('./'+$promotion.SourceRelativePath))
+        if($nodes.Count-eq1){$nodes[0].Node.SelectSingleNode('path').InnerText='./'+$promotion.CanonicalRelativePath}
+    }
     if($local){$local.Bytes=ConvertTo-EsdeGamelistBytes $local}
     # ROM source of truth: normal nodes not backed by source ROM remain whole-node (stale included).
     $sourceKeys=@($source|Where-Object {-not(Is-ClassificationAuxiliaryPath $_.RelativePath)}|ForEach-Object {'./'+$_.RelativePath})
     $preserve=@(Get-EsdeGameEntries $local|Where-Object {$_.Class-eq'Managed' -and $sourceKeys-cnotcontains$_.Key}|ForEach-Object Key)
-    $preserve+=@($isolation.PreservedGamePaths|Where-Object {(Get-EsdeGamePathInfo $_).Class-ceq'Managed'})
+    $promotedKeys=@($promotions|ForEach-Object {'./'+$_.CanonicalRelativePath})
+    $preserve+=@($isolation.PreservedGamePaths|Where-Object {(Get-EsdeGamePathInfo $_).Class-ceq'Managed' -and $promotedKeys-cnotcontains$_})
     $master=$XmlJob.GamelistSource
     if($review -and $master){
         $master=ConvertFrom-EsdeGamelistBytes $master.Bytes
         foreach($entry in @(Get-EsdeGameEntries $master)){
-            if($isolation.PreservedGamePaths-ccontains$entry.Key){[void]$entry.Node.ParentNode.RemoveChild($entry.Node)}
+            if($isolation.PreservedGamePaths-ccontains$entry.Key -and $promotedKeys-cnotcontains$entry.Key){[void]$entry.Node.ParentNode.RemoveChild($entry.Node)}
         }
         $master.Bytes=ConvertTo-EsdeGamelistBytes $master
     }
@@ -1243,7 +1641,7 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
     $output=$null
     if($bound){$output=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-classified.xml');[void](Write-EsdeGamelist $bound $output)}
     $xml=$XmlPlan.PSObject.Copy();$xml.Output=$output
-    return [pscustomobject]@{System=$RomJob.System;RomJob=$RomJob;Source=$source;Moves=$moves;Inventory=$classification;XmlPlan=$xml;Session=$Session;ReviewRequired=$review;ReviewIsolation=$isolation;ProtectMedia=($review -or $moves.Count-gt0 -or (Test-LocalOnlySystemPresence $RomJob.RemotePath) -or @(Get-LocalOnlyGameEntries $local).Count-gt0);Validated=$true}
+    return [pscustomobject]@{System=$RomJob.System;RomJob=$RomJob;Source=$source;Moves=$moves;Promotions=$promotions;CompletedPromotions=0;MasterPath=(Join-Path $XmlJob.LocalPath 'gamelist.xml');PreparedXmlSha=$(if($output){(Get-FileHash $output).Hash}else{'ABSENT'});Inventory=$classification;XmlPlan=$xml;Session=$Session;ReviewRequired=$review;ReviewIsolation=$isolation;ProtectMedia=($review -or $promotions.Count-gt0 -or $moves.Count-gt0 -or (Test-LocalOnlySystemPresence $RomJob.RemotePath) -or @(Get-LocalOnlyGameEntries $local).Count-gt0);Validated=$true}
 }
 
 function Assert-ClassificationSourceSnapshot($Plan) {
@@ -1320,6 +1718,14 @@ function Confirm-ClassificationInventory($Plan,[string]$Session) {
     $expected=@($Plan.Inventory|Where-Object {$_.Action-cne'MOVE_TO_UNREGISTERED'}|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification|ConvertTo-Json -Compress)
     $movedPaths=@($Plan.Moves|ForEach-Object DestinationRelativePath)
     $actual=@($refresh|Where-Object {$movedPaths-cnotcontains$_.RelativePath}|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification|ConvertTo-Json -Compress)
+        if($Plan.Promotions.Count){
+        $expectedRows=@($Plan.Inventory|Where-Object Action -CNE MOVE_TO_UNREGISTERED|ForEach-Object {
+            $promotion=@($Plan.Promotions|Where-Object SourceRelativePath -CEQ $_.RelativePath)
+            if($promotion.Count){[pscustomobject]@{RelativePath=$promotion[0].CanonicalRelativePath;Sha256=$_.Sha256;Classification='MANAGED'}}else{$_|Select-Object RelativePath,Sha256,Classification}
+        }|Sort-Object RelativePath)
+        $expected=@(ConvertTo-Json -InputObject $expectedRows -Compress)
+        $actual=@(ConvertTo-Json -InputObject @($refresh|Where-Object {$movedPaths-cnotcontains$_.RelativePath}|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification) -Compress)
+    }
     if(($expected -join '')-cne($actual -join '')){throw 'CLASSIFICATION BLOCK: ROM inventory changed after prepare'}
 }
 
@@ -1994,7 +2400,8 @@ try {
         $activeMediaJobs=@($mediaJobs|Where-Object {$protectedMedia-cnotcontains$_.System})
         $activeMediaSources=@($mediaSources|Where-Object {$protectedMedia-cnotcontains$_.system})
         $mediaPlan=Prepare-MediaPlan $activeMediaJobs $activeMediaSources $mediaContext
-        Invoke-ClassificationMoves $classificationPlans $classificationContext $gamelistSession
+        if(@($classificationPlans|Where-Object {$_.Promotions.Count}).Count){Invoke-ClassificationPromotions $classificationPlans $classificationContext $gamelistSession}
+        else{Invoke-ClassificationMoves $classificationPlans $classificationContext $gamelistSession}
         # 적용 후 재수집: 이전 inventory의 extra delete 목록은 절대 재사용하지 않는다.
         foreach($plan in $classificationPlans){Confirm-ClassificationInventory $plan $gamelistSession}
         foreach($plan in $classificationPlans){if(-not$plan.XmlPlan.ClassificationCommitted){Sync-GamelistSystem $plan.XmlPlan;$plan.XmlPlan.ClassificationCommitted=$true}}
@@ -2030,7 +2437,7 @@ try {
                 }
             }
         }
-        $script:RomCompletionSummary=Get-RomReviewSummary @($classificationPlans|ForEach-Object Inventory)
+        $script:RomCompletionSummary=Get-PromotionSummaryProposal @($classificationPlans|ForEach-Object Inventory) ([int](($classificationPlans|Measure-Object CompletedPromotions -Sum).Sum))
         } finally {
             try {
                 $incomplete=@();try{if($classificationContext){[void](New-ClassificationContext $StateDir $SourceRoot $Serial)}}catch{$incomplete=@($_)}
