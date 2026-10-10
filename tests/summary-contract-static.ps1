@@ -12,7 +12,7 @@ $StatusFile=Join-Path $env:TEMP ('summary-contract-'+[guid]::NewGuid().ToString(
 foreach($file in @(Get-ChildItem (Join-Path $PSScriptRoot 'gui-summary') -Filter '*-status.json')){
     $fixture=Get-Content $file.FullName -Raw -Encoding UTF8|ConvertFrom-Json
     $fields=@($fixture.summary.PSObject.Properties.Name)
-    Check (-not@(@('ManagedCount','UnmanagedMoveCount','LocalOnlyCount','ReviewCount')|Where-Object {$fields-cnotcontains$_}).Count) ($file.Name+' canonical fields')
+    Check (-not@(@('ManagedCount','UnmanagedMoveCount','PromotedCount','LocalOnlyCount','ReviewCount')|Where-Object {$fields-cnotcontains$_}).Count) ($file.Name+' canonical fields')
     Write-Status done '동기화 완료' 1 1 $fixture.summary
     $saved=Get-Content $StatusFile -Raw -Encoding UTF8|ConvertFrom-Json
     $text=Format-SyncCompletionMessage $saved.summary

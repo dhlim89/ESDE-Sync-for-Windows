@@ -1,4 +1,4 @@
-﻿ES-DE Sync for Android v1.5.0 Development
+﻿ES-DE Sync for Android v1.6.0 Development
 ======================================
 
 프로그램
@@ -379,3 +379,9 @@ _TEST/_UNREGISTERED ROM도 같은 시스템 관리 ROM SHA와 비교합니다.
 기존 local-only metadata는 whole-node/path 그대로 유지하며 없는 game을 만들지 않습니다.
 보호 수(LocalOnlyCount)와 확인 필요 수(ReviewCount)는 서로 다른 축으로 함께 집계됩니다.
 Unsupported 시스템에는 적용하지 않습니다. 상세 원인/후보 경로는 로그로 확인할 수 있습니다.
+[v1.6 개발 Stage 1.3]
+v1.6.0 Stage 1은 조건부 same-name promotion을 worker에 연결합니다. stable v1.5.0 Release는 변경하지 않습니다.
+지원 근거가 확인된 Retroid/SameBoy와 안전 metadata만 대상으로 하며 _TEST는 자동 승격하지 않습니다.
+status summary에 PromotedCount(이번 실행 완료 승격 수)를 추가합니다. 이전 status의 필드 부재는 0으로 처리합니다.
+GUI는 승격 1개 이상일 때만 관리 ROM 승격 행을 표시합니다. LocalOnlyCount는 시작 보호 수로 유지합니다.
+실제 promotion 시험은 격리 baseline/fixture와 별도 실행 승인 후에만 수행합니다.

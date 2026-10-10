@@ -9,6 +9,11 @@ $s=[pscustomobject]@{ManagedCount=97;UnmanagedMoveCount=1;LocalOnlyCount=2;Revie
 $t=Format-SyncCompletionMessage $s
 Check ($t.Contains('관리 ROM: 97') -and $t.Contains('비관리 ROM 이동: 1') -and $t.Contains('로컬 전용: 2')) 'normal counts'
 Check (-not$t.Contains('확인 필요 항목')) 'zero review hidden'
+$s|Add-Member PromotedCount 1
+$t=Format-SyncCompletionMessage $s
+Check ($t.Contains('관리 ROM 승격: 1')) 'promotion count visible'
+$s.PromotedCount=0
+Check (-not(Format-SyncCompletionMessage $s).Contains('관리 ROM 승격:')) 'zero promotion hidden legacy readability'
 $s.ReviewCount=2;$s.Items=@([pscustomobject]@{System='gb';RelativePath='Foo.gb';Classification='MANAGED_CONFLICT';AndroidSha256=('a'*64)},[pscustomobject]@{System='gbc';RelativePath='Bar.gbc';Classification='MANAGED_PATH_MISMATCH';AndroidSha256=('b'*64)})
 $t=Format-SyncCompletionMessage $s
 Check ($t.Contains('확인 필요: 2') -and $t.Contains('gb/Foo.gb') -and $t.Contains('gbc/Bar.gbc')) 'review details'

@@ -6,7 +6,7 @@
 
 ## 구성과 실행 환경
 
-현재 개발 기준은 **v1.5.0 Stage 3 개발** (stable 기준 v1.4.9)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
+현재 개발 기준은 **v1.6.0 Stage 1 개발** (stable 기준 v1.5.0)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
 
 - `ESDE-Sync.ps1`: Windows Forms GUI, ADB 및 worker 실행.
 - `sync-worker.ps1`: ROM mirror, foreground 검사, gamelist 병합, media ownership의 runtime 원본.
@@ -44,7 +44,7 @@ media는 ROM mirror와 별도 처리한다. `State\media-ownership\<source-devic
 
 App 교체와 rollback은 State/config.json/platform-tools를 보존한다. GUI/operation mutex, visible startup confirmation, 원래 오류와 rollback 오류 분리를 유지한다. `Get-PackageFiles`의 기존 App 8개 계약을 지켜 v1.4.8 설치 updater가 이해하지 못하는 새 runtime 파일을 추가하지 않는다. ZIP/hash/digest/manifest 검증과 **tag v1.4.8의 실제 validator** 호환 시험을 유지한다.
 
-`powershell.exe -NoProfile -File .\tests\media-ownership-static.ps1`처럼 테스트를 실행한다. foreground·gamelist·media 및 기존 updater/안전 테스트 전체, PowerShell 5.1 구문, BOM, `git diff --check`를 확인한다. 패키지는 `scripts/package-release.ps1 -Version 1.5.0`로 생성·재검증하고 reports/dist/State/로그/개인 설정을 포함하지 않는다.
+`powershell.exe -NoProfile -File .\tests\media-ownership-static.ps1`처럼 테스트를 실행한다. foreground·gamelist·media 및 기존 updater/안전 테스트 전체, PowerShell 5.1 구문, BOM, `git diff --check`를 확인한다. 패키지는 `scripts/package-release.ps1 -Version 1.6.0`로 생성·재검증하고 reports/dist/State/로그/개인 설정을 포함하지 않는다.
 
 실기기 시험은 승인된 격리 범위와 백업·전후 SHA를 사용한다. 실제 사용자 라이브러리에 파괴적 시험을 하지 않으며 예상 밖 결과에는 중단하고 증거를 보존한다. Phase A/B의 Retroid 검증은 통과했지만 다른 vendor 검증과 실제 앱 내 v1.4.8→v1.4.9 업데이트는 별도 확인 사항이다. 승인 없이 commit/push/main 병합/tag/Release/설치를 수행하지 않는다.
 
