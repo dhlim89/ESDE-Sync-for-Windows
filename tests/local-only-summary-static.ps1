@@ -12,7 +12,7 @@ foreach($kind in @('test','unregistered','both')){
  $expected=if($kind-ceq'both'){2}else{1}
  Check ($sum.LocalOnlyCount-eq$expected) ($kind+' runtime inventory local-only count')
  Check ($sum.ManagedCount-eq1 -and $sum.UnmanagedMoveCount-eq0 -and $sum.ReviewCount-eq0) ($kind+' other counts unchanged')
- Check (@($Calls|Where-Object {$_-match'(pull |sha256sum ).*/_(TEST|UNREGISTERED)/'}).Count-eq0) ($kind+' protected bytes not read/transferred')
+ Check (@($Calls|Where-Object {$_-match'(push |mv |rm ).*/_(TEST|UNREGISTERED)/'}).Count-eq0) ($kind+' protected files not mutated')
 }
 # local-only sidecars/미확정 extension은 ROM count에 넣지 않고 보존한다.
 Setup;$Remote.Remove('/storage/emulated/0/ROMs/gb/Hacks/fan.gb')

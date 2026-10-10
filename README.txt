@@ -371,3 +371,11 @@ _TEST/_UNREGISTERED 모두 포함하며 비ROM/sidecar 및 Unsupported legacy �
 이번에 새로 이동한 ROM은 UnmanagedMoveCount에만 포함하여 중복 집계하지 않습니다.
 예: 기존 로컬 전용 2개 + 새 이동 1개 → 비관리 ROM 이동 1 / 로컬 전용 2.
 집계 입력은 classifier 결과이며 mirror/delete 예약 폴더 보호와 GUI 문구는 그대로입니다.
+[로컬 전용 ROM과 관리 라이브러리의 동일 콘텐츠]
+_TEST/_UNREGISTERED ROM도 같은 시스템 관리 ROM SHA와 비교합니다.
+동일 콘텐츠가 있으면 local-only ROM은 보존하고 후보 관리본의 중복 전송을 보류합니다.
+후보가 하나면 LOCAL_ONLY_MANAGED_MATCH, 여러 개면 AMBIGUOUS로 확인을 요청합니다.
+자동 이름 변경·승격·save/state 이전은 하지 않습니다. 관련 system media는 보류합니다.
+기존 local-only metadata는 whole-node/path 그대로 유지하며 없는 game을 만들지 않습니다.
+보호 수(LocalOnlyCount)와 확인 필요 수(ReviewCount)는 서로 다른 축으로 함께 집계됩니다.
+Unsupported 시스템에는 적용하지 않습니다. 상세 원인/후보 경로는 로그로 확인할 수 있습니다.

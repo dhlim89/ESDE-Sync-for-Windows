@@ -45,6 +45,7 @@ function Format-SyncCompletionMessage($Summary) {
         $lines+=@('','확인 필요 항목')
         foreach($item in @($Summary.Items|Select-Object -First 5)){
             $reason=switch($item.Classification){
+                'LOCAL_ONLY_MANAGED_MATCH' {'로컬 전용 ROM과 같은 ROM이 관리 라이브러리에 추가되었습니다. 중복 전송을 보류하고 기기의 ROM을 보존했습니다. 세이브/상태 보호를 위해 자동 이름 변경은 하지 않았습니다.'}
                 'MANAGED_CONFLICT' {'기기의 ROM 버전이 관리본과 다릅니다. ROM은 보존했습니다. 버전·리비전·패치를 확인해 주세요.'}
                 'MANAGED_PATH_MISMATCH' {'같은 ROM이지만 파일 이름 또는 경로가 다릅니다. 세이브 보호를 위해 자동 변경하지 않았습니다.'}
                 'AMBIGUOUS' {'관리 ROM 대응 후보가 여러 개이거나 경로가 모호합니다. 자동 변경하지 않았습니다.'}

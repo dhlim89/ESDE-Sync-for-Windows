@@ -208,3 +208,27 @@ LocalOnlyCount는 시작 시 이미 보호 대상이었던 수이다.
 사후 실제 local-only 파일이 3개인 것과 이번 완료 요약의 시작 집계는 구분한다.
 실기기 기록의 GB40+LOCAL_ONLY2 / GBC57+LOCAL_ONLY0은 97/0/2/0으로 표시한다.
 canonical fields와 GUI formatter/layout은 변경하지 않는다.
+## Local-only managed presence / 중복 방지 (2026-10-10)
+Stage 4.3의 경로만 집계하던 local-only 입력을 SHA read-only evidence로 확장한다.
+분류 입력에서 _TEST/_UNREGISTERED의 ROM SHA를 읽고 same-system managed SHA index와 비교한다.
+한 후보: LOCAL_ONLY_MANAGED_MATCH / PRESERVE_AND_REVIEW.
+여러 후보: AMBIGUOUS / REVIEW + IsLocalOnly=true.
+후보 없음: 기존 LOCAL_ONLY / PRESERVE.
+이름이 같아도 local-only namespace를 일반 MANAGED로 승격하지 않는다.
+SHA 불명확이면 mutation 전에 BLOCK하며, 소유권/경로를 추측하지 않는다.
+
+review pair/group에는 local-only Android path와 managed SHA 후보 전체가 들어간다.
+기존 source transfer 목록에서 이 후보를 제외해 canonical 중복 push를 막는다.
+local-only 경로는 기존 mirror/delete prune도 계속 적용한다.
+gamelist는 Android existing local-only whole-node/path를 보존한다.
+canonical 후보는 Android-bound master copy에서 제외하며 기존 canonical Android node가 있을 때만 보존한다.
+없는 local-only/canonical node를 새로 만들지 않는다.
+관련 system media는 기존 REVIEW hold를 사용한다. save/state/ROM/media rename은 하지 않는다.
+
+LocalOnlyCount는 LOCAL_ONLY, LOCAL_ONLY_MANAGED_MATCH 및 local-only AMBIGUOUS를 센다.
+ReviewCount는 match와 ambiguous도 포함한다. 두 count는 보호/확인 필요라는 독립 축이다.
+UnmanagedMoveCount와 LocalOnlyCount는 시작 snapshot 기준으로 중복 없이 유지한다.
+이번에 이동한 destination은 사후 inventory 검증에서 별도 제외한다.
+시작 local-only SHA/presence가 변경되면 stale suppression 근거를 사용하지 않고 차단한다.
+Unsupported legacy system에는 새 분류/억제를 적용하지 않는다.
+기존 중복이 이미 존재해도 자동 삭제/이동/병합하지 않는다.
