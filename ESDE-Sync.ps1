@@ -31,6 +31,33 @@ $IconFile = Join-Path $InstallDir "esde-sync-icon-v141.ico"
 
 New-Item -ItemType Directory -Force -Path $AppRoot, $StateDir | Out-Null
 
+function Format-SyncCompletionMessage($Summary) {
+    if($null-eq$Summary){return 'Android 동기화가 완료되었습니다.'}
+    $lines=@(
+        '동기화 완료'
+        ''
+        ('관리 ROM: '+[int]$Summary.ManagedCount)
+        ('비관리 ROM 이동: '+[int]$Summary.UnmanagedMoveCount)
+        ('로컬 전용: '+[int]$Summary.LocalOnlyCount)
+        ('확인 필요: '+[int]$Summary.ReviewCount)
+    )
+    if([int]$Summary.ReviewCount-gt0){
+        $lines+=@('','확인 필요 항목')
+        foreach($item in @($Summary.Items|Select-Object -First 5)){
+            $reason=switch($item.Classification){
+                'LOCAL_ONLY_MANAGED_MATCH' {'로컬 전용 ROM과 같은 ROM이 관리 라이브러리에 추가되었습니다. 중복 전송을 보류하고 기기의 ROM을 보존했습니다. 세이브/상태 보호를 위해 자동 이름 변경은 하지 않았습니다.'}
+                'MANAGED_CONFLICT' {'기기의 ROM 버전이 관리본과 다릅니다. ROM은 보존했습니다. 버전·리비전·패치를 확인해 주세요.'}
+                'MANAGED_PATH_MISMATCH' {'같은 ROM이지만 파일 이름 또는 경로가 다릅니다. 세이브 보호를 위해 자동 변경하지 않았습니다.'}
+                'AMBIGUOUS' {'관리 ROM 대응 후보가 여러 개이거나 경로가 모호합니다. 자동 변경하지 않았습니다.'}
+                default {'상세 로그에서 확인이 필요한 항목을 검토해 주세요.'}
+            }
+            $lines+=@(('- '+$item.System+'/'+$item.RelativePath),('  '+$reason))
+        }
+        if([int]$Summary.ReviewCount-gt5){$lines+=('그 외 '+([int]$Summary.ReviewCount-5)+'개 항목은 상세 로그를 확인해 주세요.')}
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
 function Get-AdbPath {
     if (Test-Path $BundledAdb) { return $BundledAdb }
     $cmd = Get-Command adb.exe -ErrorAction SilentlyContinue
@@ -121,9 +148,38 @@ function Stop-AdbServer {
     try { Stop-AppAdbServer $shutdownAdb $AppRoot 10000 $log }
     catch { & $log ('ADB 종료 실패: '+$_.Exception.Message) }
 }
+function Get-EsdeGuiLayout {
+    # 96 DPI 기준 client 좌표. Dpi autoscaling은 모든 control에 동일하게 적용한다.
+    return @{
+        ClientWidth=740;ClientHeight=670
+        Bounds=@{
+            title=@(24,20,690,36);desc=@(27,60,690,26)
+            sourceLabel=@(27,92,690,22);sourceBox=@(30,116,580,28);browseBtn=@(620,114,100,32)
+            deviceLabel=@(27,154,690,22);deviceCombo=@(30,178,580,30);refreshBtn=@(620,176,100,32)
+            info=@(30,220,690,84)
+            updateLabel=@(30,316,565,32);updateBtn=@(610,316,110,32);installUpdateBtn=@(610,316,110,32)
+            warn=@(30,358,690,40);syncBtn=@(30,410,690,44)
+            progress=@(30,468,690,22);statusLabel=@(30,500,690,26);logBox=@(30,538,690,110)
+        }
+    }
+}
+
+function Set-EsdeGuiLayout($Form,[hashtable]$Controls) {
+    $layout=Get-EsdeGuiLayout
+    $Form.AutoScaleDimensions=New-Object System.Drawing.SizeF(96,96)
+    $Form.AutoScaleMode=[System.Windows.Forms.AutoScaleMode]::Dpi
+    $Form.ClientSize=New-Object System.Drawing.Size($layout.ClientWidth,$layout.ClientHeight)
+    foreach($name in $layout.Bounds.Keys){
+        if(-not$Controls.ContainsKey($name)){throw ('GUI layout control 누락: '+$name)}
+        $control=$Controls[$name];$box=$layout.Bounds[$name]
+        if($control-is[System.Windows.Forms.Label]){$control.AutoSize=$false}
+        $control.Bounds=New-Object System.Drawing.Rectangle($box[0],$box[1],$box[2],$box[3])
+    }
+    $Form.MinimumSize=$Form.Size
+}
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = ("ES-DE Sync v" + $AppVersion.version)
-$form.Size = New-Object System.Drawing.Size(760, 640)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 if (Test-Path $IconFile) {
@@ -134,71 +190,52 @@ $title = New-Object System.Windows.Forms.Label
 $title.Text = ("ES-DE Sync v" + $AppVersion.version)
 $title.Font = New-Object System.Drawing.Font("Segoe UI", 18, [System.Drawing.FontStyle]::Bold)
 $title.AutoSize = $true
-$title.Location = New-Object System.Drawing.Point(24, 20)
 $form.Controls.Add($title)
 
 $desc = New-Object System.Windows.Forms.Label
 $desc.Text = "Dropbox의 ES-DE Sync를 USB로 연결한 Android 기기에 안전하게 미러링합니다."
 $desc.AutoSize = $true
-$desc.Location = New-Object System.Drawing.Point(27, 58)
 $form.Controls.Add($desc)
 
 $sourceLabel = New-Object System.Windows.Forms.Label
 $sourceLabel.Text = "원본 ES-DE Sync 폴더"
 $sourceLabel.AutoSize = $true
-$sourceLabel.Location = New-Object System.Drawing.Point(27, 90)
 $form.Controls.Add($sourceLabel)
 
 $sourceBox = New-Object System.Windows.Forms.TextBox
-$sourceBox.Location = New-Object System.Drawing.Point(30, 112)
-$sourceBox.Size = New-Object System.Drawing.Size(580, 28)
 $form.Controls.Add($sourceBox)
 
 $browseBtn = New-Object System.Windows.Forms.Button
 $browseBtn.Text = "찾아보기"
-$browseBtn.Location = New-Object System.Drawing.Point(620, 110)
-$browseBtn.Size = New-Object System.Drawing.Size(100, 31)
 $form.Controls.Add($browseBtn)
 
 $deviceLabel = New-Object System.Windows.Forms.Label
 $deviceLabel.Text = "Android 기기"
 $deviceLabel.AutoSize = $true
-$deviceLabel.Location = New-Object System.Drawing.Point(27, 150)
 $form.Controls.Add($deviceLabel)
 
 $deviceCombo = New-Object System.Windows.Forms.ComboBox
 $deviceCombo.DropDownStyle = "DropDownList"
-$deviceCombo.Location = New-Object System.Drawing.Point(30, 172)
-$deviceCombo.Size = New-Object System.Drawing.Size(580, 30)
 $form.Controls.Add($deviceCombo)
 
 $refreshBtn = New-Object System.Windows.Forms.Button
 $refreshBtn.Text = "새로고침"
-$refreshBtn.Location = New-Object System.Drawing.Point(620, 170)
-$refreshBtn.Size = New-Object System.Drawing.Size(100, 31)
 $form.Controls.Add($refreshBtn)
 
 $info = New-Object System.Windows.Forms.Label
 $info.Text = "대상 경로:`r`nROM: /storage/emulated/0/ROMs`r`ngamelist: /storage/emulated/0/ES-DE/gamelists`r`nmedia: /storage/emulated/0/ES-DE/downloaded_media"
 $info.AutoSize = $true
-$info.Location = New-Object System.Drawing.Point(30, 220)
 $form.Controls.Add($info)
 
 $updateLabel = New-Object System.Windows.Forms.Label
 $updateLabel.Text = '업데이트 확인 대기'
-$updateLabel.Location = New-Object System.Drawing.Point(30, 282)
-$updateLabel.Size = New-Object System.Drawing.Size(565, 30)
 $form.Controls.Add($updateLabel)
 $updateBtn = New-Object System.Windows.Forms.Button
 $updateBtn.Text = '업데이트'
-$updateBtn.Location = New-Object System.Drawing.Point(610, 278)
-$updateBtn.Size = New-Object System.Drawing.Size(110, 31)
 $updateBtn.Enabled = $false
 $form.Controls.Add($updateBtn)
 $installUpdateBtn = New-Object System.Windows.Forms.Button
 $installUpdateBtn.Text = '설치'
-$installUpdateBtn.Location = New-Object System.Drawing.Point(610, 278)
-$installUpdateBtn.Size = New-Object System.Drawing.Size(110, 31)
 $installUpdateBtn.Visible = $false
 $installUpdateBtn.Enabled = $false
 $form.Controls.Add($installUpdateBtn)
@@ -207,33 +244,31 @@ $warn = New-Object System.Windows.Forms.Label
 $warn.Text = "선택된 시스템은 완전 미러링하되, 각 시스템의 _TEST / _UNREGISTERED 폴더는 항상 보존·제외합니다."
 $warn.AutoSize = $true
 $warn.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$warn.Location = New-Object System.Drawing.Point(30, 315)
 $form.Controls.Add($warn)
 
 $syncBtn = New-Object System.Windows.Forms.Button
 $syncBtn.Text = "Android 동기화 시작"
-$syncBtn.Location = New-Object System.Drawing.Point(30, 348)
-$syncBtn.Size = New-Object System.Drawing.Size(690, 44)
 $form.Controls.Add($syncBtn)
 
 $progress = New-Object System.Windows.Forms.ProgressBar
-$progress.Location = New-Object System.Drawing.Point(30, 408)
-$progress.Size = New-Object System.Drawing.Size(690, 22)
 $form.Controls.Add($progress)
 
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = "대기 중"
 $statusLabel.AutoSize = $true
-$statusLabel.Location = New-Object System.Drawing.Point(30, 440)
 $form.Controls.Add($statusLabel)
 
 $logBox = New-Object System.Windows.Forms.TextBox
-$logBox.Location = New-Object System.Drawing.Point(30, 470)
-$logBox.Size = New-Object System.Drawing.Size(690, 110)
 $logBox.Multiline = $true
 $logBox.ScrollBars = "Vertical"
 $logBox.ReadOnly = $true
 $form.Controls.Add($logBox)
+Set-EsdeGuiLayout $form @{
+    title=$title;desc=$desc;sourceLabel=$sourceLabel;sourceBox=$sourceBox;browseBtn=$browseBtn
+    deviceLabel=$deviceLabel;deviceCombo=$deviceCombo;refreshBtn=$refreshBtn;info=$info
+    updateLabel=$updateLabel;updateBtn=$updateBtn;installUpdateBtn=$installUpdateBtn;warn=$warn
+    syncBtn=$syncBtn;progress=$progress;statusLabel=$statusLabel;logBox=$logBox
+}
 
 $script:Adb = Get-AdbPath
 $script:Devices = @()
@@ -480,7 +515,9 @@ $timer.Add_Tick({
         if ($code -eq 0) {
             $progress.Value = 100
             $statusLabel.Text = "동기화 완료"
-            [System.Windows.Forms.MessageBox]::Show("Android 동기화가 완료되었습니다.") | Out-Null
+            $completionSummary=$null
+            if($st -and $st.state-ceq'done'){$completionSummary=$st.summary}
+            [System.Windows.Forms.MessageBox]::Show((Format-SyncCompletionMessage $completionSummary), '동기화 결과') | Out-Null
         } else {
             $statusLabel.Text = "동기화 실패"
             [System.Windows.Forms.MessageBox]::Show("동기화에 실패했습니다. 로그를 확인하세요.") | Out-Null

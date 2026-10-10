@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "version": "1.4.9",
+  "version": "1.5.0",
   "channel": "stable",
-  "releaseTag": "v1.4.9",
+  "releaseTag": "v1.5.0",
   "updaterVersion": "1.0.0",
   "minimumUpdaterVersion": "1.0.0"
 }

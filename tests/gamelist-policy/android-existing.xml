@@ -1,0 +1,1 @@
+﻿<alternativeEmulator custom="yes"><!--local--><label>Android</label><child x="1"/></alternativeEmulator><gameList><game><path>./a.gb</path><name>Old</name><playcount>0</playcount><playtime/><lastplayed/></game><game><path>./ghost.gb</path><name>Android only</name></game></gameList>

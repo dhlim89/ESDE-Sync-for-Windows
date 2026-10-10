@@ -1,4 +1,4 @@
-﻿ES-DE Sync for Android v1.4.9 Development
+﻿ES-DE Sync for Android v1.5.0 Development
 ======================================
 
 프로그램
@@ -293,3 +293,89 @@ v1.4.8에서 v1.4.9로 실제 앱 내 업데이트는 아직 실행하지 않았
 다른 vendor, USB 단절/강제 종료 후 수동 복구, 대규모 hash/staging 비용은 남은 확인 사항입니다.
 media rollback 범위는 media 전용이며 ROM/gamelist 전체 transaction 복원은 아닙니다.
 RC 준비는 정식 Release 게시가 아니며 승인 없이 main/tag/Release를 변경하지 않습니다.
+
+[v1.5.0 Stage 3 최종 local-only 정책 — 실환경 미실행]
+- Windows판 Dropbox 관리 라이브러리는 읽기 전용 SOURCE입니다. Android ROM을 Dropbox로 올리지 않습니다.
+- _TEST: 사용자가 직접 넣는 manual-only ROM. 앱은 scan/move/delete/overwrite에서 제외하고 보호합니다.
+- _UNREGISTERED: 앱이 일반 Android 영역의 비관리 ROM을 분류하여 옮기는 local-only 영역입니다.
+- 두 폴더는 이후 동일하게 ROM/gamelist/media 보호를 적용하며 다시 관리본으로 승격하지 않습니다.
+- 관리 여부는 ROM 파일의 canonical relative path와 SHA로 판단합니다. gamelist 존재 여부는 기준이 아닙니다.
+- same path+same SHA는 MANAGED, same path+different SHA는 MANAGED_CONFLICT입니다. conflict ROM은 보존하고 managed metadata/runtime/media 정책은 유지합니다.
+- different path+same SHA는 MANAGED_PATH_MISMATCH로 REVIEW합니다. save/state/media mapping이 unknown이면 자동 rename/delete/canonical 중복 복사를 하지 않습니다.
+- 관리본 경로/동일 SHA가 없고 검증된 ROM만 상대 하위 구조를 유지하여 _UNREGISTERED로 이동합니다.
+- destination ROM이 이미 있으면 SHA가 같아도 source를 삭제하지 않고 BLOCK합니다.
+- 기존 Android game은 whole-node를 유지하고 path만 변경합니다. 기존 node가 없으면 생성하지 않습니다.
+- destination game node 충돌은 자동 병합하지 않으며 ROM 없는 stale metadata도 삭제/이동하지 않습니다.
+- Managed metadata는 관리본 기준 + Android playcount/playtime/lastplayed(0/empty 포함) 보존 정책을 유지합니다.
+- Android alternativeEmulator subtree 보존과 GB/GBC game-level mapping도 유지합니다.
+- source validation → SAFE preflight → ES-DE stop → 전체 classification/XML/media 계획 검증 →
+  Android rename/SHA → gamelist verified transfer → inventory refresh → managed mirror → ES-DE restart.
+- 기존 mirror/공통 삭제 함수는 유지하며 관리 경로만 비교하도록 호출 범위를 제한합니다.
+- ROM/XML 실패는 자동 rollback하지 않습니다. State/android-classification의 최소 recovery-needed 기록을 보존하고 후속 작업을 차단합니다.
+- 기존 local-only 폴더가 있거나 새 분류가 있는 system은 media 파일 전체를 이번 sync에서 보존합니다.
+  flat media naming과 ROM 연결 정책이 미확정이므로 media relocation/삭제/덮어쓰기를 추측하지 않습니다.
+- 기존 Dropbox 쓰기 capability 및 채택 journal/resolution 기능은 제품에서 제거했습니다.
+- 과거 설계 문서는 docs/history에 기록으로 보존합니다. 현재 정책은 docs/v150-local-only-classification.md를 참조하십시오.
+- 자동 ROM classification은 검증된 GB/GBC에서만 활성화합니다. GBA/NES/SNES 등 그 외 정상 시스템은 classification을 건너뛰고 기존 managed mirror/delete 및 gamelist/media 동기화를 유지합니다. 잘못된 system 경로는 차단합니다.
+- 실제 monitor DPI 전환은 미검증이며 GUI 코드 변경은 없습니다.
+- 실제 Android/Dropbox 데이터와 이전 시험 ROM/journal/session은 변경하지 않았습니다. mutation 검증은 mock/fixture만이며 실제 GB/GBC는 read-only path/SHA 비교만 수행했습니다.
+[v1.5.0 ROM 분류 최종 정책]
+MANAGED: 같은 canonical path/SHA, 정상 관리 동기화.
+MANAGED_CONFLICT: Android ROM/save/state 보존, revision/patch 확인 warning. 관리본 gamelist/media 및 Android runtime 정책 유지.
+MANAGED_PATH_MISMATCH: 같은 내용으로 인정하지만 save/state/media mapping unknown이면 REVIEW. ROM만 rename하거나 canonical 복사본을 추가하지 않음.
+AMBIGUOUS: 같은 SHA의 관리본 후보가 여러 개이면 REVIEW.
+REVIEW가 있는 system은 review ROM/candidate와 game만 보존하고 media system을 보류하며 로그에 이유를 남김.
+UNMANAGED: 일반 영역의 ROM을 _UNREGISTERED로 이동. 기존 game은 path만 변경하고 whole-node 보존. Dropbox write 없음.
+현재 실제 RetroArch/SameBoy save/state canonicalization mapping은 UNKNOWN이며 자동 정규화 executor는 연결하지 않음.
+.sav/.srm/.rtc/state sidecar는 ROM 분류·전송에서 제외하고 보존.
+[v1.5.0 REVIEW 안내]
+Classification과 Action을 분리합니다.
+MANAGED=SYNC, MANAGED_CONFLICT=PRESERVE_AND_WARN,
+MANAGED_PATH_MISMATCH/AMBIGUOUS=REVIEW, UNMANAGED=MOVE_TO_UNREGISTERED,
+LOCAL_ONLY=PRESERVE, INVALID=BLOCK.
+Conflict ROM은 파일 단위로 보호하며 다른 managed ROM은 계속 처리합니다.
+ROM revision/version/patch 확인 안내와 두 SHA를 로그에 기록합니다.
+현재 PathMismatch/Ambiguous system은 review ROM/candidate와 game만 보존하고 media system을 보류하여 중복 생성과
+save/state 이름 변경을 방지합니다. 실제 mapping은 아직 UNKNOWN입니다.
+ReviewCount와 이유별/항목별 summary는 fixture로 검증했으며 GUI redesign은 하지 않습니다.
+[파일 단위 REVIEW 및 완료 요약]
+ROM REVIEW pair/group은 Android path + managed 후보 전체를 함께 제외한다.
+다른 SHA의 managed ROM은 계속 sync한다. 원본에서 사라진 일반 ROM은 삭제 근거가 없으므로
+기존 UNMANAGED 이동 정책을 따른다. review 때문에 새 삭제 정책을 만들지 않는다.
+gamelist master의 review 후보는 Android-bound copy에서 제외하고 기존 Android game만 whole-node 보존한다.
+후보에 기존 Android node가 없으면 canonical game을 추가하지 않는다.
+media의 game↔file 대응은 미확정이므로 review가 있는 system 전체를 보류한다.
+ReviewIsolation에는 Sha256/AndroidPaths/ManagedCandidatePaths 및 RomAction/GamelistAction/MediaAction을 기록한다.
+성공 후 summary를 status.json에 추가하고 기존 GUI 완료 MessageBox가 한국어 counts/reasons를 표시한다.
+ReviewCount=0이면 상세 확인 영역을 생략하며 SHA/enum은 UI에 표시하지 않는다.
+dialog는 최대 5개 항목을 표시하고 나머지는 상세 로그로 안내한다. 기존 별도 결과 복사 기능은 없다.
+오류 종료는 기존 실패 창을 유지한다. summary는 성공한 작업 및 ES-DE 재실행 후에만 완료 status에 포함된다.
+[분류 capability와 완료 summary 계약]
+Get-RomClassificationCapability: gb/gbc=Supported, 그 외 정상 system 이름=Unsupported,
+잘못된 경로/예약 system 이름=Unknown(BLOCK). Unsupported는 동기화 오류가 아닙니다.
+Unsupported는 SHA 분류, _UNREGISTERED 자동 이동, REVIEW suppression을 수행하지 않습니다.
+기존 v1.4.9 ROM mirror/delete와 예약 폴더 보호를 그대로 사용합니다.
+Unsupported gamelist는 기존 병합 경로를 사용하며 새 altemulator 변환을 강요하지 않습니다.
+media는 기존 ownership/journal 정책을 유지하고 classification으로 보류하지 않습니다.
+
+status.json의 summary 공식 필드:
+ManagedCount, UnmanagedMoveCount, LocalOnlyCount, ReviewCount.
+UnmanagedMoveCount가 "비관리 ROM 이동" 건수의 유일한 필드입니다. 별칭은 없습니다.
+Items는 상세 REVIEW 안내, Reasons는 이유별 집계입니다.
+현재 counts는 classification Supported 시스템의 inventory를 집계합니다.
+Unsupported legacy 시스템은 SHA 분류 건수에 포함하지 않습니다.
+기존 summary 없는 status와 실패 MessageBox는 계속 지원합니다.
+[로컬 전용 건수]
+LocalOnlyCount는 Supported 시스템에서 동기화 시작 시 이미 LOCAL_ONLY로 분류된 ROM 수입니다.
+_TEST/_UNREGISTERED 모두 포함하며 비ROM/sidecar 및 Unsupported legacy 시스템은 집계하지 않습니다.
+이번에 새로 이동한 ROM은 UnmanagedMoveCount에만 포함하여 중복 집계하지 않습니다.
+예: 기존 로컬 전용 2개 + 새 이동 1개 → 비관리 ROM 이동 1 / 로컬 전용 2.
+집계 입력은 classifier 결과이며 mirror/delete 예약 폴더 보호와 GUI 문구는 그대로입니다.
+[로컬 전용 ROM과 관리 라이브러리의 동일 콘텐츠]
+_TEST/_UNREGISTERED ROM도 같은 시스템 관리 ROM SHA와 비교합니다.
+동일 콘텐츠가 있으면 local-only ROM은 보존하고 후보 관리본의 중복 전송을 보류합니다.
+후보가 하나면 LOCAL_ONLY_MANAGED_MATCH, 여러 개면 AMBIGUOUS로 확인을 요청합니다.
+자동 이름 변경·승격·save/state 이전은 하지 않습니다. 관련 system media는 보류합니다.
+기존 local-only metadata는 whole-node/path 그대로 유지하며 없는 game을 만들지 않습니다.
+보호 수(LocalOnlyCount)와 확인 필요 수(ReviewCount)는 서로 다른 축으로 함께 집계됩니다.
+Unsupported 시스템에는 적용하지 않습니다. 상세 원인/후보 경로는 로그로 확인할 수 있습니다.
