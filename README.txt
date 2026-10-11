@@ -1,4 +1,4 @@
-﻿ES-DE Sync for Android v1.6.0 Development
+ES-DE Sync for Android v1.7.0 Development
 ======================================
 
 프로그램
@@ -385,3 +385,7 @@ v1.6.0 Stage 1은 조건부 same-name promotion을 worker에 연결합니다. st
 status summary에 PromotedCount(이번 실행 완료 승격 수)를 추가합니다. 이전 status의 필드 부재는 0으로 처리합니다.
 GUI는 승격 1개 이상일 때만 관리 ROM 승격 행을 표시합니다. LocalOnlyCount는 시작 보호 수로 유지합니다.
 실제 promotion 시험은 격리 baseline/fixture와 별도 실행 승인 후에만 수행합니다.
+
+v1.7.0 개발 기준: 검증된 Retroid/SameBoy GB/GBC에서 _UNREGISTERED RENAME_ONLY를 제한적으로 자동 승격합니다. 동일 SHA·단일 managed candidate·동일 parent·안전 metadata·ROM/save/state 목적지 부재가 필요합니다. .srm/.rtc/.state만 verified rename하며 slot/autostate/local media/unknown metadata/PATH_ONLY/RENAME_AND_PATH/case-only는 REVIEW입니다. SAME_NAME은 기존 v1.6 경로를 유지하고 첫 rename run media는 HOLD입니다. PromotedCount를 재사용하며 Dropbox에는 쓰지 않습니다.
+Stable v1.6.0 기록과 위 v1.5/v1.6 정책 설명은 개발 이력입니다. 현재 정책과 실기기 검증 근거: docs/v170-stage1-rename-promotion.md.
+실제 RENAME_ONLY worker 1회 및 사용자 game save/Save State load 검증을 완료했습니다. 새 RC 자체의 install/sync 검증은 별도 단계입니다.
