@@ -53,7 +53,7 @@ Check (-not$Files.ContainsKey($p.SourceRelativePath)-and$Files[$p.CanonicalRelat
 Check ($Events[-1]-ceq'completed'-and[Array]::IndexOf($Events,'xml')-lt[Array]::IndexOf($Events,'delete')) 'commit before delete completed'
 $Files[$p.SourceRelativePath]='a'*64;$Events=@();$FailXml=$true;Reject {Invoke-DuplicateTransactionMock $p $io $selection} 'XML failure stops transaction'
 Check ($Files.ContainsKey($p.SourceRelativePath)-and$Events[-1]-ceq'recovery-needed') 'recovery retains ROM no reverse'
-$worker=[IO.File]::ReadAllText((Join-Path $repo 'sync-worker.ps1'));Check (-not$worker.Contains('New-UnregisteredDuplicateProposal')-and-not$worker.Contains('Invoke-DuplicateTransactionMock')) 'normal sync no cleanup connection'
+$worker=[IO.File]::ReadAllText((Join-Path $repo 'sync-worker.ps1'));Check (-not$worker.Contains('Invoke-DuplicateTransactionMock')-and$worker.Contains('if($Operation-cne''Sync''){Invoke-DuplicateWorkerOperation;exit 0}')) 'normal sync no cleanup connection'
 Setup '<playcount>1</playcount>';$Saves=@((Asset 'SameBoy/Old.srm'),(Asset 'SameBoy/Old.rtc'));$States=@(Asset 'SameBoy/Old.state');$p=Plan
 $script:Files=@{$p.SourceRelativePath=('a'*64);$p.CanonicalRelativePath=('a'*64)};foreach($op in @($p.Operations|Where-Object Kind -In @('Save','State'))){$Files[$op.Root+'/'+$op.SourceRelativePath]=$op.ExpectedSha256}
 $Events=@();$FailXml=$false;$script:FailMove=$false

@@ -41,3 +41,30 @@ exact source single file만 허용한다. _UNREGISTERED 하위이고 _TEST가 �
 ## 남은 production 작업
 
 실제 UI 선택·snapshot 보관, Android verified exact-delete adapter, asset/XML 동시 변경 및 parent/link safety의 실기기 evidence, 전용 recovery journal, 실패 주입과 승인된 격리 실기기 검증이 필요하다. 이 단계의 READY는 설계/proposal/mock 완료를 뜻하며 사용자 데이터 정리 기능 READY가 아니다.
+## Stage 2 — production-capable adapter와 별도 GUI
+
+Stage 1 checkpoint: acbeb7ccbb723f9a49df9edc36a86f1f478b0223. version은 1.7.0 유지. Stage 2 코드의 실제 기기 삭제·저장 이동·XML 변경·sync·install은 실행하지 않는다. fake shell/memory filesystem fixture에서만 mutation을 검증한다.
+
+proposal 함수는 sync-worker.ps1로 옮겨 단일 runtime 원본으로 사용한다. tests/support entry는 worker AST 함수만 로드하고 Stage 1 mock wrapper를 유지한다. 새 App runtime 파일은 추가하지 않는다.
+
+worker Operation=Sync가 기본이다. DuplicateScan은 read-only inventory/XML pull 및 PC snapshot만 생성하고, DuplicateCleanup은 GUI의 명시적 selection 파일이 있어야 실행된다. duplicate-status.json/duplicate.log/duplicate-scan.json/duplicate-result.json과 duplicate-evidence는 normal sync status/log/summary와 분리된다. requestId로 이전 작업 결과가 현재 결과로 오인되지 않도록 한다.
+
+메인 GUI의 중복 ROM 확인 버튼은 별도 검사를 시작한다. 7개 열, safe 항목만 전체 선택, 전체 해제, 상세 SHA와 저장 migration 안내, 선택 수, 취소 가능한 확인창, 결과 복사를 제공한다. REVIEW checkbox는 read-only이며 _TEST는 행 생성 전에 제외한다. 처리 중 재실행과 닫기를 막고 normal sync/update와 operation mutex를 공유한다. 기존 공식 summary 5개 필드의 의미는 바꾸지 않고 DuplicateUnregisteredCount는 별도 informational 값으로만 사용한다.
+
+실행 직전 fresh proposal과 selection binding을 대조한다. 대상 ROM 3자 fingerprint, managed master XML, local/canonical node, asset mapping, media 및 환경 evidence를 바인딩한다. 안전 조건이 바뀐 항목은 STALE/REVIEW로 건너뛴다. 대상과 무관한 이전 항목의 정상 XML 변경은 다음 선택 항목을 잘못 stale 처리하지 않도록 per-item binding을 사용하되 실행 동안 전체 inventory/XML를 재검증한다.
+
+cleanup XML은 기존 managed merger가 만든 canonical node를 원래 Android XML에 반영하는 scoped projection이다. 해당 old local/canonical game node 외의 game/folder/alternativeEmulator 노드는 원본 그대로 유지한다. 별도 XML merger를 만들지 않는다. 기존 verified temp push → re-pull → SHA/XML 검증 → 동시 변경 확인 → 같은 디렉터리 replacement를 재사용한다.
+
+Invoke-VerifiedAndroidDuplicateDelete는 exact path, 동일 system root, _UNREGISTERED source, _TEST 제외, normalized path, source/canonical 일반 파일, symlink/parent/case 검사, SHA/size 3자 일치 및 동일 inode 거부를 적용한다. native shell은 source/canonical parent chain과 hash/size를 같은 command에서 다시 확인한 뒤 quoted `rm -- <exact source>`만 수행한다. directory/glob/recursive 삭제는 없다. 삭제 직후 journal에 rom_deleted를 기록하고 source 부재/canonical SHA·size·inode 불변을 확인한다.
+
+SAFE_MERGE_DELETE는 기존 Get-RenameAssetPlan, New-RenameAssetAdbAdapter, Invoke-VerifiedRenameAssetMoveCore를 사용한다. 지원은 .srm/.rtc/.state만, destination 존재는 동일 SHA라도 REVIEW, slot/autostate/old media는 REVIEW다. 자동 media 처리 없음.
+
+전용 State/duplicate-cleanup/<transactionId>.json은 transactionType=UNREGISTERED_DUPLICATE_CLEANUP, source/canonical/managed file evidence, selection grade/binding, XML/staging fingerprint, planned/completed asset moves, mutation intent, phase/time/error를 atomic 저장한다. phases는 prepared → assets_moved → xml_committed → rom_deleted → verified → completed다. 각 asset move의 intent/verified event를 남겨 phase 사이 crash도 추적한다. 정상 journal도 삭제하지 않는다.
+
+기존 completed 이외 journal 또는 unreadable/malformed journal은 cleanup과 normal sync를 차단한다. Get-DuplicateRecoveryReport는 파일과 journal을 read-only 대조하며 automatic resume/rollback은 모두 false다. 정식 recovery UI/자동 resume는 구현하지 않는다. 다음 Stage 3에서는 실패 evidence의 수동 reconcile 절차를 실기기에서 검증해야 한다.
+
+다중 선택은 항목별 transaction이다. stale/preflight 실패는 검토 필요로 기록하고 다음 safe 항목을 검사한다. journal 생성 이후 실패는 recovery-needed로 기록하여 이후 항목 처리를 중단한다. 이전 completed는 유지, 이후 항목은 untouched/unprocessed다. 결과에 SAFE_DELETE 완료/병합 후 완료/검토/실패/미처리를 각각 표시한다.
+
+Stage 3 실기기 승인 전까지 실제 장치에서 Duplicate Manager 실행 버튼을 누르지 않는다. production-capable 구현 완료와 실제 사용자 데이터 삭제 승인·검증은 별개이다.
+_TEST는 duplicate ROM/link/hash inventory에서 prune한다. 저장 basename 소유권 충돌을 막기 위한 별도 read-only namespace는 파일명만 사용하며 _TEST ROM 내용/SHA, 중복 count/UI row를 만들지 않는다. namespace 근거가 불완전하면 migration을 REVIEW로 남긴다. legacy helper의 옵션 기본값은 기존 동작을 유지한다.
+복구가 필요한 journal이 있으면 별도 검사 실행은 파일/XML 대조 report를 PC State에 남기고 중단한다. 다른 source/device의 journal을 현재 기기에 적용하거나 자동 resume하지 않는다.
