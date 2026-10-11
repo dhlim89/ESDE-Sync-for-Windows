@@ -1,4 +1,4 @@
-﻿# v1.8 Stage 1 — _UNREGISTERED Duplicate Manager
+# v1.8 Stage 1 — _UNREGISTERED Duplicate Manager
 
 ## 범위와 개발 기준
 
@@ -68,3 +68,33 @@ SAFE_MERGE_DELETE는 기존 Get-RenameAssetPlan, New-RenameAssetAdbAdapter, Invo
 Stage 3 실기기 승인 전까지 실제 장치에서 Duplicate Manager 실행 버튼을 누르지 않는다. production-capable 구현 완료와 실제 사용자 데이터 삭제 승인·검증은 별개이다.
 _TEST는 duplicate ROM/link/hash inventory에서 prune한다. 저장 basename 소유권 충돌을 막기 위한 별도 read-only namespace는 파일명만 사용하며 _TEST ROM 내용/SHA, 중복 count/UI row를 만들지 않는다. namespace 근거가 불완전하면 migration을 REVIEW로 남긴다. legacy helper의 옵션 기본값은 기존 동작을 유지한다.
 복구가 필요한 journal이 있으면 별도 검사 실행은 파일/XML 대조 report를 PC State에 남기고 중단한다. 다른 source/device의 journal을 현재 기기에 적용하거나 자동 resume하지 않는다.
+# Stage 3.1 REMOTE-ONLY
+
+실기기 Stage 3은 원격 환경 전환으로 보류한다. SAFE_DELETE 첫 준비 시도는
+읽어온 master XML을 같은 파일에 저장하여 기존 `Write-EsdeGamelist`의 overwrite
+protection에 차단됐다. Android mutation은 없었으며 기존 evidence는 보존한다.
+
+`tests/support/duplicate-remote-harness.ps1`는 test-only staging authority를 확인한다.
+원본 master → SHA/size 검증 복사본 → 새 fixture-master.xml 순서로 저장한다.
+원본/입력 덮어쓰기, staging 외부 경로, reparse point는 차단한다. production writer와
+worker/GUI runtime은 수정하지 않는다. 테스트의 production-original은 합성 fixture이며
+실제 설치본/Dropbox master에 쓰거나 실제 ADB transport를 호출하지 않는다.
+
+격리 staging에는 `source`, `master`, `android-fixture`, `evidence`가 있다.
+fake Android는 `storage/emulated/0/{ROMs,RetroArch,ES-DE}`를 실제 TEMP 파일로
+구성한다. proposal, scoped XML merger, verified asset move core, verified duplicate
+delete core, batch transaction 및 recovery gate는 production 함수를 재사용한다.
+filesystem transport만 Fixture/Mock backend로 교체한다. 실제 shell transport는
+기존 production fixture에서 검증하며, remote 검증은 기기의 filesystem/ADB나
+SameBoy 실행 검증을 대체하지 않는다.
+
+`tests/duplicate-remote-static.ps1`는 SAFE_DELETE, 3종 SAFE_MERGE_DELETE,
+GUI selection→transaction 연결, folder/게임 metadata 보존, REVIEW/BLOCK,
+prepared/assets_moved/xml_committed/rom_deleted 실패 및 read-only recovery를 검증한다.
+completed 재실행은 안전하게 거부하고 자동 rollback/resume는 하지 않는다.
+기존 GUI fixture가 REVIEW disabled, select all/clear all, confirmation/cancel,
+copy payload, `_TEST` 행 제외를 계속 검증한다. evidence는 자동 정리하지 않는다.
+
+remote 결과는 **v1.8 Stage 3.1 REMOTE READY**만 사용할 수 있다.
+실제 GUI SAFE_DELETE와 SAFE_MERGE_DELETE 및 사용자 save/Save State load 확인은
+실기기 접근이 재개된 이후 별도 Stage 3에서 수행한다. version은 1.7.0을 유지한다.
