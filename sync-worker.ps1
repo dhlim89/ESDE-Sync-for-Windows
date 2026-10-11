@@ -841,9 +841,70 @@ function Convert-EsdeAndroidAltemulators($Gamelist,[string]$System,[Parameter(Ma
 }
 
 
+function Get-EsdeFolderEntries($Gamelist) {
+    if($null-eq$Gamelist){return}
+    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($node in $Gamelist.Document.DocumentElement.SelectNodes('gameList/folder')){
+        $paths=@($node.SelectNodes('path'))
+        if($paths.Count-ne1-or@($paths[0].SelectNodes('*')).Count){throw 'GAMELIST BLOCK: folder requires one text path'}
+        # Folder-only optional trailing separator; game/file path contract stays unchanged.
+        $path=$paths[0].InnerText.Replace('\','/')
+        if($path.EndsWith('/')){$path=$path.Substring(0,$path.Length-1)}
+        $info=Get-EsdeGamePathInfo $path
+        if($info.Class-ceq'Invalid'-or-not$seen.Add($info.Key)){throw 'GAMELIST BLOCK: folder path invalid/duplicate/case collision'}
+        foreach($tag in @('name','desc','playcount','playtime','lastplayed')){if(@($node.SelectNodes($tag)).Count-gt1){throw ('GAMELIST BLOCK: duplicate folder field '+$tag)}}
+        [pscustomobject]@{Key=$info.Key;Class=$info.Class;Node=$node}
+    }
+}
+function Merge-EsdeFolderMetadata($Result,[object[]]$MasterFolders,[object[]]$AndroidFolders) {
+    $list=$Result.Document.DocumentElement.SelectSingleNode('gameList')
+    $changed=$false
+    foreach($entry in $AndroidFolders){
+        $match=@($MasterFolders|Where-Object Key -IEQ $entry.Key)
+        if($match.Count-and$match[0].Key-cne$entry.Key){throw 'GAMELIST BLOCK: cross-input folder case collision'}
+        if(-not$match.Count){
+            [void]$list.AppendChild($Result.Document.CreateWhitespace($Result.Newline))
+            [void]$list.AppendChild($Result.Document.ImportNode($entry.Node,$true));$changed=$true;continue
+        }
+        $target=@(Get-EsdeFolderEntries $Result|Where-Object Key -CEQ $entry.Key)[0].Node
+        if(Merge-EsdeRuntimeGameTags $target $entry.Node){$changed=$true}
+        foreach($attr in $entry.Node.Attributes){
+            $existing=$target.GetAttributeNode($attr.Name)
+            if($existing-and$existing.Value-cne$attr.Value){throw ('GAMELIST BLOCK: folder custom attribute collision '+$attr.Name)}
+            if(-not$existing){[void]$target.Attributes.Append($Result.Document.ImportNode($attr,$true));$changed=$true}
+        }
+        $usedOpaque=New-Object 'Collections.Generic.HashSet[System.Xml.XmlNode]'
+        $seenCustom=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach($child in $entry.Node.ChildNodes){
+            if($child.NodeType-in@('Whitespace','SignificantWhitespace')){continue}
+            if($child.NodeType-eq'Element'){
+                if($child.Name-cin@('playcount','playtime','lastplayed')){continue}
+                $existing=@($match[0].Node.ChildNodes|Where-Object {$_.NodeType-eq'Element'-and$_.Name-ceq$child.Name})
+                if($child.Name-cin@('path','name','desc')){
+                    # These observed/general metadata fields retain the master value.
+                    # Complex local payload must never be silently discarded.
+                    if($existing.Count){
+                        if($child.Attributes.Count-or@($child.ChildNodes|Where-Object {$_.NodeType-cnotin@('Text','CDATA','Whitespace','SignificantWhitespace')}).Count){if($existing[0].OuterXml-cne$child.OuterXml){throw 'GAMELIST BLOCK: complex local folder field collision'}}
+                        continue
+                    }
+                }elseif($existing.Count){
+                    if($existing.Count-ne1-or-not$seenCustom.Add($child.Name)-or$existing[0].OuterXml-cne$child.OuterXml){throw ('GAMELIST BLOCK: folder custom field collision '+$child.Name)}
+                    continue
+                }
+            }else{
+                $opaque=@($match[0].Node.ChildNodes|Where-Object {$_.NodeType-ne'Element'-and$_.OuterXml-ceq$child.OuterXml-and-not$usedOpaque.Contains($_)})
+                if($opaque.Count){[void]$usedOpaque.Add($opaque[0]);continue}
+            }
+            [void]$target.AppendChild($Result.Document.ImportNode($child,$true));$changed=$true
+        }
+    }
+    return $changed
+}
 function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$PreservedUnmanagedPaths=@()) {
     $warnings=New-Object 'Collections.Generic.List[string]'
     $emit={param($message)$warnings.Add($message);if($Warning){& $Warning $message|Out-Null}}.GetNewClosure()
+    $baseFolders=@(Get-EsdeFolderEntries $Base)
+    $localFolders=@(Get-EsdeFolderEntries $Local)
     $baseEntries=@(Get-EsdeGameEntries $Base $emit)
     $unmanaged=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach($path in $PreservedUnmanagedPaths){
@@ -854,7 +915,7 @@ function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$Preser
     $localEntries=@(Get-EsdeGameEntries $Local $emit|Where-Object {$_.Class-in@('LocalTest','LocalUnregistered') -or $unmanaged.Contains($_.Key)})
     $localAlternative=@(if($Local){$Local.Document.DocumentElement.SelectNodes('alternativeEmulator')})
     if($localAlternative.Count-gt1){throw 'Android alternativeEmulator 중복'}
-    if($null-eq$Base -and $localEntries.Count-eq0 -and $localAlternative.Count-eq0){return $null}
+    if($null-eq$Base -and $localEntries.Count-eq0 -and $localAlternative.Count-eq0 -and $localFolders.Count-eq0){return $null}
     $template=if($null-ne$Base){$Base}else{$Local}
     $result=ConvertFrom-EsdeGamelistBytes $template.Bytes 'merge copy'
     $result.Document=$template.Document.CloneNode($true)
@@ -900,6 +961,7 @@ function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$Preser
         }
         $changed=$true
     }
+    if(Merge-EsdeFolderMetadata $result $baseFolders $localFolders){$changed=$true}
     $result.Bytes=if($changed){ConvertTo-EsdeGamelistBytes $result}else{$template.Bytes}
     [void](ConvertFrom-EsdeGamelistBytes $result.Bytes 'merge verification')
     $result|Add-Member -NotePropertyName Warnings -NotePropertyValue @($warnings.ToArray())
@@ -1168,9 +1230,9 @@ function Get-PromotionSummaryProposal([object[]]$StartEntries,[int]$CompletedPro
     # UI/status writer unchanged; proposal contract only.
     if($CompletedPromotions-lt0){throw 'promotion count invalid'}
     $summary=Get-RomReviewSummary $StartEntries
-    $eligible=@($StartEntries|Where-Object Action -CEQ PROMOTE_TO_MANAGED).Count
+    $eligible=@($StartEntries|Where-Object {$_.Action-cin@('PROMOTE_TO_MANAGED','PROMOTE_WITH_RENAME')}).Count
     if($CompletedPromotions-gt$eligible){throw 'promotion count exceeds plans'}
-    $summary.Items=@($summary.Items|Where-Object Action -CNE PROMOTE_TO_MANAGED)
+    $summary.Items=@($summary.Items|Where-Object {$_.Action-cnotin@('PROMOTE_TO_MANAGED','PROMOTE_WITH_RENAME')})
     $summary.ReviewCount=$summary.Items.Count
     $summary.Reasons=@($summary.Items|Group-Object Classification,Reason|ForEach-Object {[pscustomobject]@{ReasonCode=$_.Group[0].Classification;Reason=$_.Group[0].Reason;Count=$_.Count}})
     $summary.PromotedCount=$CompletedPromotions
@@ -1179,6 +1241,265 @@ function Get-PromotionSummaryProposal([object[]]$StartEntries,[int]$CompletedPro
 function Invoke-VerifiedAndroidRomMoveMock($Move,$IO) {
     if($IO.Mode-cne'Mock'){throw 'PROMOTION BLOCK: mock adapter required'}
     return Invoke-VerifiedAndroidRomMoveCore $Move $IO
+}
+
+# v1.7 RENAME_ONLY pure planning helpers; mutations remain in verified adapters.
+function Get-RenamePromotionKind([string]$Source,[string]$Canonical) {
+    if(-not$Source.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal)){return 'EXCLUDED'}
+    $local=$Source.Substring(14)
+    if($local-ceq$Canonical){return 'SAME_NAME'}
+    if($local-ieq$Canonical){return 'CASE_ONLY'}
+    $sameParent=([IO.Path]::GetDirectoryName($local)-ceq[IO.Path]::GetDirectoryName($Canonical))
+    $sameLeaf=([IO.Path]::GetFileName($local)-ceq[IO.Path]::GetFileName($Canonical))
+    if($sameParent){return 'RENAME_ONLY'}
+    if($sameLeaf){return 'PATH_ONLY'}
+    return 'RENAME_AND_PATH'
+}
+function Get-RenameAssetPlan([string]$OldStem,[string]$NewStem,[object[]]$Saves,[object[]]$States) {
+    $result=[pscustomobject]@{Safe=$true;Reason='complete inventory; supported naming';Operations=@();Fingerprints=@();Unsupported=@()}
+    foreach($kind in @('Save','State')){
+        $rows=if($kind-ceq'Save'){@($Saves)}else{@($States)}
+        $root=if($kind-ceq'Save'){'/storage/emulated/0/RetroArch/saves'}else{'/storage/emulated/0/RetroArch/states'}
+        $extensions=if($kind-ceq'Save'){@('.srm','.rtc')}else{@('.state')}
+        $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach($row in $rows){
+            $info=Get-EsdeGamePathInfo $row.RelativePath
+            if($info.Class-cne'Managed' -or $info.Key.Substring(2)-cne$row.RelativePath -or -not$seen.Add($row.RelativePath) -or $row.IsLink-ne$false -or $row.Kind-cne'File' -or $row.Sha256-cnotmatch'^[a-f0-9]{64}$' -or $null-eq$row.Size -or $row.Size-lt0){$result.Safe=$false;$result.Reason='invalid/link/duplicate/incomplete asset inventory';continue}
+            $leaf=[IO.Path]::GetFileName($row.RelativePath)
+            foreach($stem in @($OldStem,$NewStem)){
+                if($leaf.StartsWith($stem+'.',[StringComparison]::OrdinalIgnoreCase)){
+                    $extension=$leaf.Substring($stem.Length)
+                    if(-not$row.RelativePath.StartsWith('SameBoy/',[StringComparison]::Ordinal) -or $row.RelativePath.Split('/').Count-ne2 -or $extension-cnotin$extensions -or $leaf-cne($stem+$extension)){$result.Safe=$false;$result.Unsupported+=($kind+':'+$row.RelativePath);$result.Reason='unknown core/slot/autostate/case naming'}
+                }
+            }
+        }
+        foreach($ext in $extensions){
+            $source='SameBoy/'+$OldStem+$ext;$destination='SameBoy/'+$NewStem+$ext
+            $old=@($rows|Where-Object RelativePath -CEQ $source);$new=@($rows|Where-Object RelativePath -IEQ $destination)
+            # An existing destination blocks even when the source is absent: ownership is unknown.
+            if($new.Count){$result.Safe=$false;$result.Reason='save/state destination collision; never merge/delete';continue}
+            if($old.Count-eq1){$op=[pscustomobject]@{Kind=$kind;Root=$root;SourceRelativePath=$source;DestinationRelativePath=$destination;ExpectedSha256=$old[0].Sha256;Size=$old[0].Size};$result.Operations+=$op;$result.Fingerprints+=$op}
+        }
+    }
+    return $result
+}
+function Get-RenameMediaPlan([string]$OldStem,[string]$NewStem,[object[]]$AndroidMedia,[object[]]$ManagedMedia) {
+    # Observed GB/GBC baseline only; not an inferred universal ES-DE schema.
+    $layout=@{'3dboxes'=@('.png');backcovers=@('.jpg','.png');covers=@('.jpg','.png');fanart=@('.jpg');manuals=@('.pdf');marquees=@('.png');miximages=@('.png');physicalmedia=@('.png');screenshots=@('.jpg','.png');titlescreens=@('.jpg','.png');videos=@('.mp4')}
+    $result=[pscustomobject]@{Safe=$true;Status='NO_LOCAL_MEDIA';Reason='no old-name media; HOLD then ownership-aware normal mirror';Action='HOLD';Candidates=@()}
+    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($row in @($AndroidMedia)+@($ManagedMedia)){
+        $parts=$row.RelativePath.Split('/');$info=Get-EsdeGamePathInfo $row.RelativePath
+        if($info.Class-cne'Managed' -or $parts.Count-ne2 -or -not$layout.ContainsKey($parts[0]) -or [IO.Path]::GetExtension($parts[-1])-cnotin$layout[$parts[0]] -or $row.IsLink-ne$false -or $row.Kind-cne'File' -or $row.Sha256-cnotmatch'^[a-f0-9]{64}$'){$result.Safe=$false;$result.Status='MEDIA_COLLISION_OR_UNKNOWN';$result.Reason='unverified category/layout/link/hash'}
+    }
+    foreach($row in $AndroidMedia){if(-not$seen.Add($row.RelativePath)){$result.Safe=$false;$result.Status='MEDIA_COLLISION_OR_UNKNOWN';$result.Reason='case/duplicate media path'}}
+    foreach($row in $AndroidMedia){
+        $leaf=[IO.Path]::GetFileName($row.RelativePath)
+        if([IO.Path]::GetFileNameWithoutExtension($leaf)-ine$OldStem){continue}
+        $destination=$row.RelativePath.Substring(0,$row.RelativePath.LastIndexOf('/')+1)+$NewStem+[IO.Path]::GetExtension($leaf)
+        $new=@($AndroidMedia|Where-Object RelativePath -IEQ $destination);$master=@($ManagedMedia|Where-Object RelativePath -IEQ $destination)
+        $result.Safe=$false
+        if($new.Count -or $master.Count -or [IO.Path]::GetFileNameWithoutExtension($leaf)-cne$OldStem){$result.Status='MEDIA_COLLISION_OR_UNKNOWN';$result.Reason='local/managed media collision or case ambiguity; no deletion/adoption'}
+        elseif($result.Status-cne'MEDIA_COLLISION_OR_UNKNOWN'){$result.Status='LOCAL_MEDIA_RENAMEABLE';$result.Reason='one-to-one candidate only; ownership/naming not runtime-verified'}
+        $result.Candidates+=[pscustomobject]@{SourceRelativePath=$row.RelativePath;DestinationRelativePath=$destination;ExpectedSha256=$row.Sha256;Executable=$false}
+    }
+    return $result
+}
+function New-RenamePromotionProposal($Entry,[object[]]$AndroidInventory,$AndroidXml,$MasterXml,$Evidence,[object[]]$Saves,[object[]]$States,[object[]]$AndroidMedia,[object[]]$ManagedMedia) {
+    $p=[pscustomobject]@{Classification=$Entry.Classification;Action='PRESERVE_AND_REVIEW';Eligible=$false;PromotionType='RENAME';ChangeType='EXCLUDED';System=$Entry.System;SourceRelativePath=$Entry.RelativePath;CanonicalRelativePath=$null;Reason='not a unique local-only managed match';Operations=@();MediaAction='HOLD';AssetPlan=$null;MediaPlan=$null;XmlEvidence=$null;PreparedXml=$null}
+    if($Entry.Classification-cne'LOCAL_ONLY_MANAGED_MATCH' -or @($Entry.MatchedShaPaths).Count-ne1){return $p}
+    $p.CanonicalRelativePath=@($Entry.MatchedShaPaths)[0];$p.ChangeType=Get-RenamePromotionKind $Entry.RelativePath $p.CanonicalRelativePath
+    if($p.ChangeType-cne'RENAME_ONLY'){$p.Reason='same-name uses v1.6; path/case/_TEST changes remain REVIEW';return $p}
+    if($Entry.System-cnotin@('gb','gbc') -or $Entry.AndroidSha256-cnotmatch'^[a-f0-9]{64}$' -or $Entry.AndroidSha256-cne$Entry.ManagedSha256){$p.Reason='system/hash evidence';return $p}
+    try{[void](Get-ClassificationRelativePath $Entry.System $p.CanonicalRelativePath @($Entry.System))}catch{$p.Reason='canonical invalid';return $p}
+    if([IO.Path]::GetExtension($Entry.RelativePath)-cne[IO.Path]::GetExtension($p.CanonicalRelativePath)){$p.Reason='extension changed';return $p}
+    $source=@($AndroidInventory|Where-Object {$_.System-ceq$Entry.System -and $_.RelativePath-ceq$Entry.RelativePath})
+    if($source.Count-ne1 -or $source[0].Sha256-cne$Entry.AndroidSha256 -or @($AndroidInventory|Where-Object {$_.System-ceq$Entry.System -and $_.RelativePath-ieq$p.CanonicalRelativePath}).Count){$p.Reason='source stale or destination/case collision';return $p}
+    if(-not$Evidence -or $Evidence.Verified-ne$true -or $Evidence.Core-cne'SameBoy' -or $Evidence.System-cne$Entry.System -or $Evidence.CompleteAssetInventory-ne$true -or $Evidence.CompleteMediaInventory-ne$true -or $Evidence.CompleteSameBoyContentInventory-ne$true -or $Evidence.PathIndependent-ne$true -or [string]::IsNullOrWhiteSpace($Evidence.Reference)){$p.Reason='mapping/environment/inventory not verified';return $p}
+    $oldStem=[IO.Path]::GetFileNameWithoutExtension($Entry.RelativePath);$newStem=[IO.Path]::GetFileNameWithoutExtension($p.CanonicalRelativePath)
+    if($oldStem-ieq$newStem){$p.Reason='case-only/shared basename';return $p}
+    if(@($AndroidInventory|Where-Object {($_.System-cne$Entry.System -or $_.RelativePath-cne$Entry.RelativePath) -and [IO.Path]::GetFileNameWithoutExtension($_.RelativePath)-iin@($oldStem,$newStem)}).Count){$p.Reason='SameBoy basename shared by other content';return $p}
+    $managed=@($Evidence.ManagedContents)
+    if(@($managed|Where-Object {$_.System-ceq$Entry.System -and $_.RelativePath-ceq$p.CanonicalRelativePath -and $_.Sha256-ceq$Entry.ManagedSha256}).Count-ne1 -or @($managed|Where-Object {($_.System-cne$Entry.System -or $_.RelativePath-cne$p.CanonicalRelativePath) -and [IO.Path]::GetFileNameWithoutExtension($_.RelativePath)-iin@($oldStem,$newStem)}).Count){$p.Reason='managed SameBoy basename inventory missing/colliding';return $p}
+    $safety=Get-PromotionMetadataSafety $AndroidXml $MasterXml ('./'+$Entry.RelativePath) ('./'+$p.CanonicalRelativePath)
+    if(-not$safety.Safe){$p.Reason=$safety.Reason;if($safety.Category-ceq'INVALID/COLLISION'){$p.Action='BLOCK'};return $p}
+    if(-not$safety.HasManagedNode){$p.Reason='canonical master metadata missing';return $p}
+    $p.AssetPlan=Get-RenameAssetPlan $oldStem $newStem $Saves $States
+    $p.MediaPlan=Get-RenameMediaPlan $oldStem $newStem $AndroidMedia $ManagedMedia
+    if(-not$p.AssetPlan.Safe){$p.Reason=$p.AssetPlan.Reason;return $p}
+    if(-not$p.MediaPlan.Safe){$p.Reason=$p.MediaPlan.Reason;return $p}
+    $p.PreparedXml=Get-PromotionBoundGamelist $AndroidXml $MasterXml $Entry.System ('./'+$Entry.RelativePath) ('./'+$p.CanonicalRelativePath)
+    $p.XmlEvidence=Get-PromotionXmlEvidence $AndroidXml $MasterXml ('./'+$Entry.RelativePath) ('./'+$p.CanonicalRelativePath)
+    $p.Operations=@([pscustomobject]@{Kind='ROM';Root=('/storage/emulated/0/ROMs/'+$Entry.System);SourceRelativePath=$Entry.RelativePath;DestinationRelativePath=$p.CanonicalRelativePath;ExpectedSha256=$Entry.AndroidSha256;System=$Entry.System})+@($p.AssetPlan.Operations)
+    $p|Add-Member PreparedXmlSha (Get-MediaTextHash ([Convert]::ToBase64String($p.PreparedXml.Bytes)))
+    $p|Add-Member PlanBinding (Get-RenamePlanBinding $p)
+    $p.Eligible=$true;$p.Action='PROMOTE_WITH_RENAME';$p.Reason='verified rename proposal; complete supported mapping and no local media'
+    return $p
+}
+function Get-RenamePlanBinding($Proposal) {
+    return Get-MediaTextHash ($Proposal.System+'|'+$Proposal.SourceRelativePath+'|'+$Proposal.CanonicalRelativePath+'|'+($Proposal.Operations|ConvertTo-Json -Depth 8 -Compress)+'|'+$Proposal.PreparedXmlSha+'|'+($Proposal.XmlEvidence|ConvertTo-Json -Compress))
+}
+
+function Assert-RenameAssetParent([string]$Root) {
+    if($Root-cnotin@('/storage/emulated/0/RetroArch/saves','/storage/emulated/0/RetroArch/states')){throw 'RENAME BLOCK: asset root'}
+    $device=$null
+    foreach($path in @('/storage/emulated/0/RetroArch',$Root,($Root+'/SameBoy'))){
+        $q=Quote-Sh $path
+        $out=Invoke-PromotionShell ('if [ -L '+$q+' ] || [ ! -d '+$q+' ]; then exit 1; fi; readlink -f '+$q)
+        if($out.TrimEnd([char]13,[char]10)-cne$path){throw 'RENAME BLOCK: asset parent redirect/link'}
+        Assert-RenameFileCase $path
+        $d=(Invoke-PromotionShell ('stat -c %d '+$q)).TrimEnd([char]13,[char]10)
+        if($d-cnotmatch'^\d+$'-or($device-and$d-cne$device)){throw 'RENAME BLOCK: asset filesystem'};$device=$d
+    }
+    return [pscustomobject]@{Safe=$true;Exists=$true;Kind='Directory';CanonicalPath=($Root+'/SameBoy');Device=$device}
+}
+function Assert-RenameFileCase([string]$Path) {
+    $parent=$Path.Substring(0,$Path.LastIndexOf('/'));$leaf=$Path.Substring($Path.LastIndexOf('/')+1)
+    $listing=Invoke-PromotionShell ('find '+(Quote-Sh $parent)+' -mindepth 1 -maxdepth 1 -print0')
+    if($listing-and-not$listing.EndsWith([string][char]0)){throw 'RENAME BLOCK: case listing format'}
+    $matches=@($listing-split'\x00'|Where-Object {$_}|Where-Object {if(-not$_.StartsWith($parent+'/',[StringComparison]::Ordinal)){throw 'RENAME BLOCK: case scope'};$_.Substring($parent.Length+1)-ieq$leaf})
+    if($matches.Count-gt1-or($matches.Count-eq1-and$matches[0]-cne$Path)){throw 'RENAME BLOCK: case collision'}
+}
+function Get-RenameRemoteInventory([string]$Root) {
+    if($Root-cnotin@('/storage/emulated/0/RetroArch/saves','/storage/emulated/0/RetroArch/states','/storage/emulated/0/ROMs','/storage/emulated/0/ES-DE/downloaded_media/gb','/storage/emulated/0/ES-DE/downloaded_media/gbc')){throw 'RENAME BLOCK: inventory root'}
+    $q=Quote-Sh $Root
+    $kind=Invoke-PromotionShell ('if [ -L '+$q+' ]; then printf LINK; elif [ -d '+$q+' ]; then printf DIR; elif [ -e '+$q+' ]; then printf OTHER; else printf ABSENT; fi')
+    # Absent inventory is uncertain, not evidence that save/state is absent.
+    if($kind-cne'DIR'){throw 'RENAME REVIEW: inventory directory/link unknown'}
+    $canonical=(Invoke-PromotionShell ('readlink -f '+$q)).TrimEnd([char]13,[char]10)
+    if($canonical-cne$Root){throw 'RENAME BLOCK: inventory root redirect'}
+    if(Invoke-PromotionShell ('find '+$q+' -type l -print')){throw 'RENAME REVIEW: inventory link'}
+    $body='for f do s=$(stat -c %s "$f") || exit 1; h=$(sha256sum "$f") || exit 1; printf "%s\t%s\n" "$s" "$h"; done'
+    $text=Invoke-PromotionShell ('find '+$q+' -type f -exec sh -c '+(Quote-Sh $body)+' sh {} +')
+    $rows=@();$seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($line in @($text-split'\r?\n'|Where-Object {$_})){
+        if($line-cnotmatch'^([0-9]+)\t([a-f0-9]{64})  (.+)$'){throw 'RENAME BLOCK: inventory format'}
+        $size=[long]$Matches[1];$hash=$Matches[2];$path=$Matches[3]
+        if(-not$path.StartsWith($Root+'/',[StringComparison]::Ordinal)){throw 'RENAME BLOCK: inventory escape'}
+        $relative=$path.Substring($Root.Length+1);$info=Get-EsdeGamePathInfo $relative
+        if($info.Class-ceq'Invalid'-or$info.Key.Substring(2)-cne$relative-or-not$seen.Add($relative)){throw 'RENAME BLOCK: inventory path/duplicate/case'}
+        $rows+=[pscustomobject]@{RelativePath=$relative;Size=$size;Sha256=$hash;Kind='File';IsLink=$false}
+    }
+    return @($rows|Sort-Object RelativePath)
+}
+function Get-RenameAssetInventory {
+    [void](Assert-RenameAssetParent '/storage/emulated/0/RetroArch/saves')
+    [void](Assert-RenameAssetParent '/storage/emulated/0/RetroArch/states')
+    return [pscustomobject]@{Saves=@(Get-RenameRemoteInventory '/storage/emulated/0/RetroArch/saves');States=@(Get-RenameRemoteInventory '/storage/emulated/0/RetroArch/states')}
+}
+function Get-RenameContentPathEvidence([string]$RelativePath,[string]$Sha256) {
+    $info=Get-EsdeGamePathInfo $RelativePath
+    if($info.Class-ceq'Invalid' -or $info.Key.Substring(2)-cne$RelativePath){throw 'RENAME REVIEW: invalid content relative path'}
+    # Use the existing verified classification policy, not another ROM allowlist.
+    $extensions=@(Get-ClassificationExtensions 'gb')+@(Get-ClassificationExtensions 'gbc')
+    $leaf=[IO.Path]::GetFileName($RelativePath)
+    if([IO.Path]::GetExtension($leaf).ToLowerInvariant()-cnotin$extensions){return $null}
+    $parts=$RelativePath.Split('/')
+    if($parts.Count-lt2){throw 'RENAME REVIEW: ROM content system missing'}
+    $capability=Get-RomClassificationCapability $parts[0]
+    if($capability.Status-cne'Supported'){throw 'RENAME REVIEW: ROM content system unverified'}
+    $relative=$parts[1..($parts.Count-1)]-join'/'
+    if([IO.Path]::GetExtension($leaf).ToLowerInvariant()-cnotin@(Get-ClassificationExtensions $parts[0])){throw 'RENAME REVIEW: ROM extension/system mismatch'}
+    if($Sha256-cnotmatch'^[a-f0-9]{64}$'){throw 'RENAME REVIEW: content SHA unknown'}
+    return [pscustomobject]@{System=$parts[0];RelativePath=$relative;Sha256=$Sha256}
+}
+function Get-RenameContentEvidence {
+    $android=@();$managed=@()
+    foreach($row in @(Get-RenameRemoteInventory '/storage/emulated/0/ROMs')){
+        $content=Get-RenameContentPathEvidence $row.RelativePath $row.Sha256
+        if($content){$android+=$content}
+    }
+    $romRoot=Join-Path $SourceRoot 'roms';Assert-LocalSourcePath $romRoot $SourceRoot
+    foreach($system in Get-ChildItem -LiteralPath $romRoot -Directory -Force){
+        Assert-LocalSourcePath $system.FullName $SourceRoot ([long]$system.Attributes)
+        foreach($file in Get-ChildItem -LiteralPath $system.FullName -Recurse -Force){
+            Assert-LocalSourcePath $file.FullName $SourceRoot ([long]$file.Attributes)
+            if($file.PSIsContainer){continue}
+            $relative=$system.Name+'/'+$file.FullName.Substring($system.FullName.Length+1).Replace('\','/')
+            $content=Get-RenameContentPathEvidence $relative (Get-FileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            if($content){$managed+=$content}
+        }
+    }
+    return [pscustomobject]@{Android=$android;Managed=$managed}
+}
+function Get-RenameProductionSnapshot([string]$System) {
+    $assets=Get-RenameAssetInventory;$content=Get-RenameContentEvidence
+    $media=@(Get-RenameRemoteInventory ('/storage/emulated/0/ES-DE/downloaded_media/'+$System))
+    return [pscustomobject]@{Assets=$assets;Content=$content;AndroidMedia=$media}
+}
+function New-RenameProductionProposal($Entry,$Android,$Master,$Environment,$Snapshot) {
+    # Keep Stage 3's existing verified raw GB/GBC rename scope; classification formats are inventory evidence only.
+    $verifiedFormat=[IO.Path]::GetExtension($Entry.RelativePath).ToLowerInvariant()-cin@('.gb','.gbc')
+    $e=[pscustomobject]@{Verified=($Environment.Verified-and$verifiedFormat);Core='SameBoy';System=$Entry.System;CompleteAssetInventory=$true;CompleteMediaInventory=$true;CompleteSameBoyContentInventory=$true;PathIndependent=$Environment.PathIndependentSaveState;Reference='Stage2 Retroid 7b67d4e2 SameBoy rename/load PASS';ManagedContents=$Snapshot.Content.Managed}
+    $p=New-RenamePromotionProposal $Entry $Snapshot.Content.Android $Android $Master $e $Snapshot.Assets.Saves $Snapshot.Assets.States $Snapshot.AndroidMedia @()
+    $p|Add-Member SafePromotionEligible $p.Eligible
+    if($p.Eligible){
+        $p.Operations[0]|Add-Member Sha256 $p.Operations[0].ExpectedSha256
+        $p|Add-Member RenameSnapshot $Snapshot
+        $p|Add-Member Environment $Environment
+        $p.PlanBinding=Get-RenamePlanBinding $p
+        $p|Add-Member SnapshotBinding (Get-MediaTextHash ($Snapshot|ConvertTo-Json -Depth 20 -Compress))
+    }
+    return $p
+}
+function Assert-RenamePromotionSnapshot($Promotion,[object[]]$CompletedAssets=@()) {
+    $now=Get-RenameProductionSnapshot $Promotion.System;$old=$Promotion.RenameSnapshot
+    foreach($kind in @('Save','State')){
+        $before=if($kind-ceq'Save'){@($old.Assets.Saves)}else{@($old.Assets.States)}
+        $after=if($kind-ceq'Save'){@($now.Assets.Saves)}else{@($now.Assets.States)}
+        $expected=@($before|ForEach-Object {$row=$_.PSObject.Copy();foreach($move in @($CompletedAssets|Where-Object Kind -CEQ $kind)){if($row.RelativePath-ceq$move.SourceRelativePath){$row.RelativePath=$move.DestinationRelativePath}};$row}|Sort-Object RelativePath)
+        if((ConvertTo-Json -InputObject $expected -Compress)-cne(ConvertTo-Json -InputObject @($after) -Compress)){throw ('RENAME BLOCK: asset inventory revision/collision '+$kind)}
+    }
+    if((ConvertTo-Json -InputObject @($old.AndroidMedia) -Compress)-cne(ConvertTo-Json -InputObject @($now.AndroidMedia) -Compress)){throw 'RENAME BLOCK: media changed'}
+    if((ConvertTo-Json -InputObject @($old.Content.Managed|Sort-Object System,RelativePath) -Compress)-cne(ConvertTo-Json -InputObject @($now.Content.Managed|Sort-Object System,RelativePath) -Compress)){throw 'RENAME BLOCK: managed basename evidence changed'}
+    # Other Android content may not acquire either stem between planning and execution.
+    $stems=@([IO.Path]::GetFileNameWithoutExtension($Promotion.SourceRelativePath),[IO.Path]::GetFileNameWithoutExtension($Promotion.CanonicalRelativePath))
+    $others=@($now.Content.Android|Where-Object {-not($_.System-ceq$Promotion.System-and$_.RelativePath-cin@($Promotion.SourceRelativePath,$Promotion.CanonicalRelativePath)) -and [IO.Path]::GetFileNameWithoutExtension($_.RelativePath)-iin$stems})
+    if($others.Count){throw 'RENAME BLOCK: shared basename appeared'}
+}
+function Invoke-VerifiedRenameAssetMoveCore($Operation,$IO) {
+    if($IO.Mode-cnotin@('Mock','Adb')-or$Operation.Kind-cnotin@('Save','State')){throw 'RENAME BLOCK: asset adapter/kind'}
+    $root=if($Operation.Kind-ceq'Save'){'/storage/emulated/0/RetroArch/saves'}else{'/storage/emulated/0/RetroArch/states'}
+    $extensions=if($Operation.Kind-ceq'Save'){@('.srm','.rtc')}else{@('.state')}
+    if($Operation.Root-cne$root-or$Operation.ExpectedSha256-cnotmatch'^[a-f0-9]{64}$'){throw 'RENAME BLOCK: root/evidence'}
+    foreach($relative in @($Operation.SourceRelativePath,$Operation.DestinationRelativePath)){
+        $info=Get-EsdeGamePathInfo $relative
+        if($info.Class-cne'Managed'-or$info.Key.Substring(2)-cne$relative-or-not$relative.StartsWith('SameBoy/',[StringComparison]::Ordinal)-or$relative.Split('/').Count-ne2-or[IO.Path]::GetExtension($relative)-cnotin$extensions){throw 'RENAME BLOCK: asset path/extension'}
+    }
+    $s=$root+'/'+$Operation.SourceRelativePath;$d=$root+'/'+$Operation.DestinationRelativePath
+    if($s-ieq$d){throw 'RENAME BLOCK: asset case-only/same path'}
+    $parent=& $IO.Parent $root ($root+'/SameBoy') $false;$src=& $IO.Stat $s;$dst=& $IO.Stat $d
+    if(-not$parent.Safe-or-not$parent.Exists-or$parent.Kind-cne'Directory'-or$parent.CanonicalPath-cne($root+'/SameBoy')-or-not$src.Exists-or$src.Kind-cne'File'-or$src.IsLink-or$src.Sha256-cne$Operation.ExpectedSha256-or$src.Size-ne$Operation.Size-or[string]::IsNullOrWhiteSpace($src.Device)-or$src.Device-cne$parent.Device-or$dst.Exists-or$dst.IsLink){throw 'RENAME BLOCK: asset preflight revision/collision'}
+    [void](& $IO.MoveNoClobber $s $d $Operation.ExpectedSha256)
+    $dst=& $IO.Stat $d;$src=& $IO.Stat $s
+    if($src.Exists-or$src.IsLink-or-not$dst.Exists-or$dst.Kind-cne'File'-or$dst.IsLink-or$dst.Sha256-cne$Operation.ExpectedSha256-or$dst.Size-ne$Operation.Size-or$dst.Device-cne$parent.Device){throw 'RENAME RECOVERY NEEDED: asset verification'}
+}
+function New-RenameAssetAdbAdapter {
+    return [pscustomobject]@{Mode='Adb';Parent={param($root,$parent,$create)if($create-or$parent-cne($root+'/SameBoy')){throw 'RENAME BLOCK: parent policy'};Assert-RenameAssetParent $root};Stat={param($path)
+        if($path-cnotmatch'^/storage/emulated/0/RetroArch/(saves|states)/SameBoy/[^/]+$'){throw 'RENAME BLOCK: stat scope'}
+        Assert-RenameFileCase $path;$q=Quote-Sh $path
+        $kind=Invoke-PromotionShell ('if [ -L '+$q+' ]; then printf LINK; elif [ -f '+$q+' ]; then printf FILE; elif [ -e '+$q+' ]; then printf OTHER; else printf ABSENT; fi')
+        if($kind-ceq'ABSENT'){return [pscustomobject]@{Exists=$false;IsLink=$false;Kind='File'}}
+        if($kind-cne'FILE'){throw 'RENAME BLOCK: asset type/link'}
+        $stat=(Invoke-PromotionShell ('stat -c %s:%d '+$q)).TrimEnd([char]13,[char]10)
+        if($stat-cnotmatch'^(\d+):(\d+)$'){throw 'RENAME BLOCK: stat format'};$size=[long]$Matches[1];$device=$Matches[2]
+        $hash=(Invoke-PromotionShell ('sha256sum '+$q)).TrimEnd([char]13,[char]10)
+        if($hash-cnotmatch('^([a-f0-9]{64})  '+[regex]::Escape($path)+'$')){throw 'RENAME BLOCK: hash format'}
+        return [pscustomobject]@{Exists=$true;IsLink=$false;Kind='File';Sha256=$Matches[1];Size=$size;Device=$device}
+    };MoveNoClobber={param($s,$d,$sha)
+        foreach($p in @($s,$d)){if($p-cnotmatch'^/storage/emulated/0/RetroArch/(saves|states)/SameBoy/[^/]+$'){throw 'RENAME BLOCK: move scope'}}
+        $root=$s.Substring(0,$s.LastIndexOf('/'));if($d.Substring(0,$d.LastIndexOf('/'))-cne$root){throw 'RENAME BLOCK: cross root'}
+        $guards=(@('/storage/emulated/0/RetroArch',$root.Substring(0,$root.LastIndexOf('/')),$root)|ForEach-Object {'[ -L '+(Quote-Sh $_)+' ] || [ ! -d '+(Quote-Sh $_)+' ]'})-join' || '
+        $out=Invoke-PromotionShell ('if '+$guards+' || [ -L '+(Quote-Sh $s)+' ] || [ ! -f '+(Quote-Sh $s)+' ] || [ -e '+(Quote-Sh $d)+' ] || [ -L '+(Quote-Sh $d)+' ]; then exit 1; fi; hash=$(sha256sum '+(Quote-Sh $s)+') || exit 1; [ "${hash%% *}" = '+(Quote-Sh $sha)+' ] || exit 1; mv -n '+(Quote-Sh $s)+' '+(Quote-Sh $d))
+        if($out){throw 'RENAME RECOVERY NEEDED: move output'}
+    }}
+}
+function Invoke-VerifiedRenameAssetMove($Operation) {
+    Invoke-VerifiedRenameAssetMoveCore $Operation (New-RenameAssetAdbAdapter)
+}
+function Invoke-VerifiedRenameRomMove($Move,[string]$Session,[scriptblock]$Recorder) {
+    if((Get-RomClassificationCapability $Move.System).Status-cne'Supported'-or(Get-RenamePromotionKind $Move.SourceRelativePath $Move.DestinationRelativePath)-cne'RENAME_ONLY'){throw 'RENAME BLOCK: ROM direction'}
+    return Invoke-VerifiedAndroidRomMoveCore $Move (New-PromotionAdbAdapter $Session $Recorder)
 }
 
 function Invoke-PromotionShell([string]$Command) {
@@ -1269,13 +1590,14 @@ function Invoke-VerifiedAndroidRomMove($Move,[string]$Session,[scriptblock]$Evid
     return Invoke-VerifiedAndroidRomMoveCore $Move (New-PromotionAdbAdapter $Session $EvidenceRecorder)
 }
 
-function Get-PromotionEnvironmentEvidence([string]$System,$Android,$Master,[string]$CanonicalKey) {
+function Get-PromotionEnvironmentEvidence([string]$System,$Android,$Master,[string]$CanonicalKey,[string]$SourceKey) {
     $none=[pscustomobject]@{Verified=$false;System=$System;Reference='SameBoy environment not confirmed'}
     if($Serial-cne'7b67d4e2' -or $System-cnotin@('gb','gbc')){return $none}
     $node=@(Get-EsdeGameEntries $Master|Where-Object Key -CEQ $CanonicalKey)
     if($node.Count-gt1){return $none}
     if($node.Count -and $node[0].Node.SelectSingleNode('altemulator') -and $node[0].Node.SelectSingleNode('altemulator').InnerText-cne'SameBoy'){return $none}
-    $localNode=@(Get-EsdeGameEntries $Android|Where-Object Key -CEQ ('./_UNREGISTERED/'+$CanonicalKey.Substring(2)))
+    if(-not$SourceKey){$SourceKey='./_UNREGISTERED/'+$CanonicalKey.Substring(2)}
+    $localNode=@(Get-EsdeGameEntries $Android|Where-Object Key -CEQ $SourceKey)
     if($localNode.Count -and $localNode[0].Node.SelectSingleNode('altemulator') -and $localNode[0].Node.SelectSingleNode('altemulator').InnerText-cne'SameBoy'){return $none}
     $alternative=if($Android){$Android.Document.DocumentElement.SelectSingleNode('alternativeEmulator/label')}
     if(-not$alternative -or $alternative.InnerText-cne'SameBoy'){return $none}
@@ -1299,7 +1621,7 @@ function Get-PromotionXmlEvidence($Local,$Master,[string]$SourceKey,[string]$Can
     return [pscustomobject]@{AndroidSha256=$(if($Local){Get-MediaTextHash ([Convert]::ToBase64String($Local.Bytes))}else{'ABSENT'});MasterSha256=$(if($Master){Get-MediaTextHash ([Convert]::ToBase64String($Master.Bytes))}else{'ABSENT'});LocalNodeSha256=$(if($localNode.Count-eq1){Get-MediaTextHash $localNode[0].Node.OuterXml}else{'ABSENT'});MasterNodeSha256=$(if($masterNode.Count-eq1){Get-MediaTextHash $masterNode[0].Node.OuterXml}else{'ABSENT'})}
 }
 
-function Assert-PromotionEvidence($Plan,[string]$Session) {
+function Assert-PromotionEvidence($Plan,[string]$Session,[object[]]$CompletedAssets=@()) {
     Assert-ClassificationSourceSnapshot $Plan
     Assert-PromotionGamelistSnapshot $Plan.XmlPlan
     if($Plan.XmlPlan.Output -and (Get-FileHash $Plan.XmlPlan.Output).Hash-cne$Plan.PreparedXmlSha){throw 'PROMOTION BLOCK: staged XML changed'}
@@ -1311,8 +1633,13 @@ function Assert-PromotionEvidence($Plan,[string]$Session) {
         if(($e|ConvertTo-Json -Compress)-cne($promotion.XmlEvidence|ConvertTo-Json -Compress)){throw 'PROMOTION BLOCK: XML/node evidence changed'}
         $safe=Get-PromotionMetadataSafety $local $master ('./'+$promotion.SourceRelativePath) ('./'+$promotion.CanonicalRelativePath)
         if(-not$safe.Safe){throw 'PROMOTION BLOCK: metadata revalidation'}
-        $environment=Get-PromotionEnvironmentEvidence $Plan.System $local $master ('./'+$promotion.CanonicalRelativePath)
+        $environment=Get-PromotionEnvironmentEvidence $Plan.System $local $master ('./'+$promotion.CanonicalRelativePath) ('./'+$promotion.SourceRelativePath)
         if(-not$environment.Verified -or $environment.ConfigSha256-cne$promotion.Environment.ConfigSha256){throw 'PROMOTION BLOCK: environment changed'}
+        if($promotion.Action-ceq'PROMOTE_WITH_RENAME'){
+            if((Get-RenamePlanBinding $promotion)-cne$promotion.PlanBinding -or $promotion.Operations[0].Sha256-cne$promotion.Operations[0].ExpectedSha256){throw 'RENAME BLOCK: plan binding changed'}
+            if((Get-MediaTextHash ($promotion.RenameSnapshot|ConvertTo-Json -Depth 20 -Compress))-cne$promotion.SnapshotBinding){throw 'RENAME BLOCK: snapshot binding changed'}
+            Assert-RenamePromotionSnapshot $promotion $CompletedAssets
+        }
     }
 }
 
@@ -1356,14 +1683,33 @@ function Invoke-ClassificationPromotions([object[]]$Plans,$Context,[string]$Sess
     $guard=New-ClassificationContext $Context.StateRoot $Context.SourceRoot $Context.Serial
     if($guard.File-cne$Context.File -or $Context.Serial-cne$Serial){throw 'PROMOTION BLOCK: state/device context'}
     # All mixed classification moves commit one staged XML per system; no reverse move.
-    foreach($plan in $Plans){if(-not$plan.Validated){throw 'PROMOTION BLOCK: plan'};if($plan.Promotions.Count){Assert-PromotionEvidence $plan $Session}else{Assert-ClassificationSourceSnapshot $plan;Assert-GamelistSnapshot $plan.XmlPlan}}
+    foreach($plan in $Plans){
+        if(-not$plan.Validated){throw 'PROMOTION BLOCK: plan'}
+        if($plan.Promotions.Count){
+            Assert-PromotionEvidence $plan $Session
+            foreach($p in $plan.Promotions){
+                $src=Read-ClassificationRom ($plan.RomJob.RemotePath+'/'+$p.SourceRelativePath) $Session
+                Assert-PromotionFileCase ($plan.RomJob.RemotePath+'/'+$p.CanonicalRelativePath)
+                $dst=Read-ClassificationRom ($plan.RomJob.RemotePath+'/'+$p.CanonicalRelativePath) $Session
+                if(-not$src-or$src.Sha256-cne$p.Operations[0].Sha256-or$dst){throw 'PROMOTION BLOCK: final ROM preflight revision/collision'}
+            }
+        }else{Assert-ClassificationSourceSnapshot $plan;Assert-GamelistSnapshot $plan.XmlPlan}
+    }
     $transaction=[guid]::NewGuid().ToString('N')
     $archive=Join-Path (Join-Path $Context.StateRoot 'android-classification-history') ($transaction+'.json')
-    $state=[pscustomobject]@{schemaVersion=1;identity=$Context.Identity;transactionId=$transaction;status='prepared';at=[DateTimeOffset]::UtcNow.ToString('o');moves=@();parentAttempts=@();error='';staging=$Session}
-    foreach($plan in $Plans){foreach($p in $plan.Promotions){$state.moves+=[pscustomobject]@{System=$plan.System;SourceRelativePath=$p.SourceRelativePath;DestinationRelativePath=$p.CanonicalRelativePath;ExpectedSha256=$p.Operations[0].Sha256;InitialSourceSha256=$p.Operations[0].Sha256;DestinationExpectedAbsent=$true;GamelistAction='CANONICALIZE_AND_MERGE';MediaAction='HOLD';SaveAction='PRESERVE';StateAction='PRESERVE';XmlEvidence=$p.XmlEvidence}}}
+    $state=[pscustomobject]@{schemaVersion=1;identity=$Context.Identity;transactionId=$transaction;status='prepared';at=[DateTimeOffset]::UtcNow.ToString('o');moves=@();parentAttempts=@();assetMoves=@();completedAssets=@();lastSuccessfulPhase='prepared';events=@([pscustomobject]@{Phase='prepared';At=[DateTimeOffset]::UtcNow.ToString('o')});error='';staging=$Session}
+    foreach($plan in $Plans){foreach($p in $plan.Promotions){$state.moves+=[pscustomobject]@{System=$plan.System;SourceRelativePath=$p.SourceRelativePath;DestinationRelativePath=$p.CanonicalRelativePath;ExpectedSha256=$p.Operations[0].Sha256;InitialSourceSha256=$p.Operations[0].Sha256;DestinationExpectedAbsent=$true;GamelistAction='CANONICALIZE_AND_MERGE';MediaAction='HOLD';SaveAction=$(if($p.Action-ceq'PROMOTE_WITH_RENAME'){'RENAME_VERIFIED'}else{'PRESERVE'});StateAction=$(if($p.Action-ceq'PROMOTE_WITH_RENAME'){'RENAME_VERIFIED'}else{'PRESERVE'});PromotionType=$(if($p.Action-ceq'PROMOTE_WITH_RENAME'){'RENAME'}else{'SAME_NAME'});XmlEvidence=$p.XmlEvidence}}}
+    foreach($plan in $Plans){foreach($p in @($plan.Promotions|Where-Object Action -CEQ PROMOTE_WITH_RENAME)){$state.assetMoves+=@($p.AssetPlan.Operations)}}
+    $persist={param($phase,$detail)
+        $state.status=$phase
+        if($phase-cne'recovery-needed'){$state.lastSuccessfulPhase=$phase}
+        $state.events+=@([pscustomobject]@{Phase=$phase;At=[DateTimeOffset]::UtcNow.ToString('o');Detail=$detail})
+        Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
+    }.GetNewClosure()
     $recorder={param($phase,$item)
         if($phase-ceq'parent-attempt'){$state.parentAttempts+=@($item.Parent)}
-        if($phase-ceq'rom-verified'){$state.status='rom_moved'}
+        if($phase-ceq'rom-verified'){$state.status='rom_moved';$state.lastSuccessfulPhase='rom_moved'}
+        $state.events+=@([pscustomobject]@{Phase=$phase;Item=$item;At=[DateTimeOffset]::UtcNow.ToString('o')})
         Write-MediaJson $Context.File $state $Context.StateRoot
         Write-MediaJson $archive $state $Context.StateRoot
     }.GetNewClosure()
@@ -1382,14 +1728,32 @@ function Invoke-ClassificationPromotions([object[]]$Plans,$Context,[string]$Sess
                 [void](Invoke-VerifiedAndroidRomMoveCore $e (New-PromotionAdbAdapter $Session $recorder))
             }
             foreach($promotion in $plan.Promotions){
-                Assert-PromotionEvidence $plan $Session
+                Assert-PromotionEvidence $plan $Session $state.completedAssets
                 $e=@($state.moves|Where-Object {$_.System-ceq$plan.System -and $_.SourceRelativePath-ceq$promotion.SourceRelativePath})[0]
-                [void](Invoke-VerifiedAndroidRomMove $e $Session $recorder)
-                $state.status='rom_moved';Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
-                Assert-PromotionEvidence $plan $Session
+                if($promotion.Action-ceq'PROMOTE_WITH_RENAME'){
+                    [void](Invoke-VerifiedRenameRomMove $e $Session $recorder)
+                    [void](& $persist 'rom_moved' $e)
+                    Assert-PromotionEvidence $plan $Session $state.completedAssets
+                    foreach($kind in @('Save','State')){
+                        foreach($asset in @($promotion.AssetPlan.Operations|Where-Object Kind -CEQ $kind)){
+                            Assert-PromotionEvidence $plan $Session $state.completedAssets
+                            $state.events+=@([pscustomobject]@{Phase='asset-attempt';Item=$asset;At=[DateTimeOffset]::UtcNow.ToString('o')})
+                            Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
+                            Invoke-VerifiedRenameAssetMove $asset
+                            $state.completedAssets+=@($asset)
+                            [void](& $persist $state.lastSuccessfulPhase ('asset verified '+$asset.SourceRelativePath))
+                            Assert-PromotionEvidence $plan $Session $state.completedAssets
+                        }
+                        [void](& $persist $(if($kind-ceq'Save'){'saves_moved'}else{'states_moved'}) $promotion.SourceRelativePath)
+                    }
+                }else{
+                    [void](Invoke-VerifiedAndroidRomMove $e $Session $recorder)
+                    [void](& $persist 'rom_moved' $e)
+                    Assert-PromotionEvidence $plan $Session $state.completedAssets
+                }
             }
             if($plan.Moves.Count -or $plan.Promotions.Count){
-                if($plan.Promotions.Count){Assert-PromotionEvidence $plan $Session}
+                if($plan.Promotions.Count){Assert-PromotionEvidence $plan $Session $state.completedAssets}
                 Sync-PromotionGamelist $plan.XmlPlan
                 if($plan.XmlPlan.Output){
                     $back=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-promotion-final.xml')
@@ -1403,12 +1767,14 @@ function Invoke-ClassificationPromotions([object[]]$Plans,$Context,[string]$Sess
                     if($current.MasterSha256-cne$promotion.XmlEvidence.MasterSha256 -or $current.MasterNodeSha256-cne$promotion.XmlEvidence.MasterNodeSha256){throw 'PROMOTION RECOVERY NEEDED: master changed during XML commit'}
                 }
                 $plan.XmlPlan.ClassificationCommitted=$true;$plan.CompletedPromotions=$plan.Promotions.Count
-                $state.status='xml_committed';Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
+                [void](& $persist 'xml_committed' $plan.System)
             }
+            foreach($p in @($plan.Promotions|Where-Object Action -CEQ PROMOTE_WITH_RENAME)){Assert-RenamePromotionSnapshot $p $state.completedAssets}
+            if(@($plan.Promotions|Where-Object Action -CEQ PROMOTE_WITH_RENAME).Count){[void](& $persist 'media_completed_or_held' 'HOLD; no media mutation')}
             Confirm-ClassificationInventory $plan $Session
         }
-        $state.status='completed';Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot
-    }catch{$state.status='recovery-needed';$state.error=$_.Exception.Message;Write-MediaJson $Context.File $state $Context.StateRoot;Write-MediaJson $archive $state $Context.StateRoot;throw}
+        [void](& $persist 'completed' 'inventory MANAGED; mirror will compare canonical SHA')
+    }catch{$state.error=$_.Exception.Message;[void](& $persist 'recovery-needed' $state.error);throw}
 }
 function Get-RomClassificationNotice($Entry) {
     $message=switch($Entry.Classification){
@@ -1433,7 +1799,7 @@ function Get-RomReviewSummary([object[]]$Entries) {
     # 시작 시 Supported 분류 결과만 집계한다. 이동 후 재분류로 중복 집계하지 않는다.
     $Entries=@($Entries|Where-Object {(Get-RomClassificationCapability $_.System).Status-ceq'Supported'})
     # UI-independent proposal. Do not change GUI/status contracts in this stage.
-    $items=@($Entries|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS','LOCAL_ONLY_MANAGED_MATCH') -and $_.Action-cne'PROMOTE_TO_MANAGED'}|ForEach-Object {Get-RomClassificationNotice $_})
+    $items=@($Entries|Where-Object {$_.Classification-in@('MANAGED_CONFLICT','MANAGED_PATH_MISMATCH','AMBIGUOUS','LOCAL_ONLY_MANAGED_MATCH') -and $_.Action-cnotin@('PROMOTE_TO_MANAGED','PROMOTE_WITH_RENAME')}|ForEach-Object {Get-RomClassificationNotice $_})
     $reasons=@($items|Group-Object Classification,Reason|ForEach-Object {[pscustomobject]@{ReasonCode=$_.Group[0].Classification;Reason=$_.Group[0].Reason;Count=$_.Count}})
     return [pscustomobject]@{
         PromotedCount=0
@@ -1582,23 +1948,45 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
     $promotions=@()
     $initialLocal=if($XmlPlan.Local){ConvertFrom-EsdeGamelistBytes $XmlPlan.Local.Bytes}else{$null}
     $masterOriginal=$XmlJob.GamelistSource
+    $renameSnapshot=$null
     foreach($entry in @($classification|Where-Object Classification -CEQ LOCAL_ONLY_MANAGED_MATCH)){
         $canonical=@($entry.MatchedShaPaths)[0]
-        if(-not$entry.RelativePath.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal) -or $entry.RelativePath.Substring(14)-cne$canonical){continue}
+        $kind=Get-RenamePromotionKind $entry.RelativePath $canonical
+        if($kind-cnotin@('SAME_NAME','RENAME_ONLY')){continue}
         if(@($android|Where-Object {$_.RelativePath-ieq$canonical}).Count){continue}
         $safety=Get-PromotionMetadataSafety $initialLocal $masterOriginal ('./'+$entry.RelativePath) ('./'+$canonical)
         if($safety.Category-ceq'INVALID/COLLISION'){throw ('PROMOTION BLOCK: '+$safety.Reason)}
         if(-not$safety.Safe){continue}
-        $environment=Get-PromotionEnvironmentEvidence $RomJob.System $initialLocal $masterOriginal ('./'+$canonical)
+        $environment=Get-PromotionEnvironmentEvidence $RomJob.System $initialLocal $masterOriginal ('./'+$canonical) ('./'+$entry.RelativePath)
         if(-not$environment.Verified){continue}
         $parent=($RomJob.RemotePath+'/'+$canonical);$parent=$parent.Substring(0,$parent.LastIndexOf('/'))
         [void](Get-VerifiedRomParent $RomJob.RemotePath $parent $false)
-        $proposal=New-SameNamePromotionProposal $entry $android @(Get-EsdeGameEntries $initialLocal|ForEach-Object Key) @(Get-EsdeGameEntries $masterOriginal|ForEach-Object Key) $environment
+        if($kind-ceq'SAME_NAME'){
+            $proposal=New-SameNamePromotionProposal $entry $android @(Get-EsdeGameEntries $initialLocal|ForEach-Object Key) @(Get-EsdeGameEntries $masterOriginal|ForEach-Object Key) $environment
+            $proposal|Add-Member PromotionType 'SAME_NAME'
+        }else{
+            try{
+                if(-not$renameSnapshot){$renameSnapshot=Get-RenameProductionSnapshot $RomJob.System}
+                $proposal=New-RenameProductionProposal $entry $initialLocal $masterOriginal $environment $renameSnapshot
+            }catch{Write-Log ('RENAME REVIEW: inventory/environment unknown '+$_.Exception.Message);continue}
+            if($proposal.Action-ceq'BLOCK'){throw ('RENAME BLOCK: '+$proposal.Reason)}
+        }
         if($proposal.SafePromotionEligible){
-            $proposal|Add-Member XmlEvidence (Get-PromotionXmlEvidence $initialLocal $masterOriginal ('./'+$entry.RelativePath) ('./'+$canonical))
-            $proposal|Add-Member Environment $environment
-            $promotions+=$proposal;$entry.Action='PROMOTE_TO_MANAGED'
-            Write-Log ('PROMOTION PLAN: '+$RomJob.System+'/'+$entry.RelativePath+' -> '+$canonical+' media=HOLD save/state=PRESERVE')
+            if(-not$proposal.PSObject.Properties['XmlEvidence']){$proposal|Add-Member XmlEvidence $null}
+            $proposal.XmlEvidence=Get-PromotionXmlEvidence $initialLocal $masterOriginal ('./'+$entry.RelativePath) ('./'+$canonical)
+            if(-not$proposal.PSObject.Properties['Environment']){$proposal|Add-Member Environment $environment}
+            $promotions+=$proposal;$entry.Action=$proposal.Action
+            Write-Log ('PROMOTION PLAN: '+$kind+' '+$RomJob.System+'/'+$entry.RelativePath+' -> '+$canonical+' media=HOLD')
+        }
+    }
+    # Multiple Android sources must not race for one canonical destination.
+    foreach($group in @($promotions|Group-Object CanonicalRelativePath|Where-Object Count -GT 1)){
+        $same=@($group.Group|Where-Object Action -CEQ PROMOTE_TO_MANAGED)
+        $keep=if($same.Count-eq1){$same[0]}else{$null}
+        foreach($p in $group.Group){if($keep-and$p.SourceRelativePath-ceq$keep.SourceRelativePath){continue}
+            $row=@($classification|Where-Object RelativePath -CEQ $p.SourceRelativePath)[0]
+            $row.Action='PRESERVE_AND_REVIEW';$row.Reason='multiple local promotion claims for canonical destination'
+            $promotions=@($promotions|Where-Object SourceRelativePath -CNE $p.SourceRelativePath)
         }
     }
     $review=@($classification|Where-Object {$_.Action-in@('REVIEW','PRESERVE_AND_REVIEW')}).Count-gt0
@@ -2412,7 +2800,7 @@ try {
             $label = "$($job.Bucket.Name): $($job.System)"
             Write-Status "running" "$label 처리 중..." $i $jobs.Count
             Write-Log "PROCESS $label"
-    
+
             if($job.Bucket.Local-eq'gamelists'){
                 if(-not$gamelistPlans[$job.System].ClassificationCommitted){Sync-GamelistSystem $gamelistPlans[$job.System]}
             }
