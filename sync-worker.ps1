@@ -841,9 +841,70 @@ function Convert-EsdeAndroidAltemulators($Gamelist,[string]$System,[Parameter(Ma
 }
 
 
+function Get-EsdeFolderEntries($Gamelist) {
+    if($null-eq$Gamelist){return}
+    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($node in $Gamelist.Document.DocumentElement.SelectNodes('gameList/folder')){
+        $paths=@($node.SelectNodes('path'))
+        if($paths.Count-ne1-or@($paths[0].SelectNodes('*')).Count){throw 'GAMELIST BLOCK: folder requires one text path'}
+        # Folder-only optional trailing separator; game/file path contract stays unchanged.
+        $path=$paths[0].InnerText.Replace('\','/')
+        if($path.EndsWith('/')){$path=$path.Substring(0,$path.Length-1)}
+        $info=Get-EsdeGamePathInfo $path
+        if($info.Class-ceq'Invalid'-or-not$seen.Add($info.Key)){throw 'GAMELIST BLOCK: folder path invalid/duplicate/case collision'}
+        foreach($tag in @('name','desc','playcount','playtime','lastplayed')){if(@($node.SelectNodes($tag)).Count-gt1){throw ('GAMELIST BLOCK: duplicate folder field '+$tag)}}
+        [pscustomobject]@{Key=$info.Key;Class=$info.Class;Node=$node}
+    }
+}
+function Merge-EsdeFolderMetadata($Result,[object[]]$MasterFolders,[object[]]$AndroidFolders) {
+    $list=$Result.Document.DocumentElement.SelectSingleNode('gameList')
+    $changed=$false
+    foreach($entry in $AndroidFolders){
+        $match=@($MasterFolders|Where-Object Key -IEQ $entry.Key)
+        if($match.Count-and$match[0].Key-cne$entry.Key){throw 'GAMELIST BLOCK: cross-input folder case collision'}
+        if(-not$match.Count){
+            [void]$list.AppendChild($Result.Document.CreateWhitespace($Result.Newline))
+            [void]$list.AppendChild($Result.Document.ImportNode($entry.Node,$true));$changed=$true;continue
+        }
+        $target=@(Get-EsdeFolderEntries $Result|Where-Object Key -CEQ $entry.Key)[0].Node
+        if(Merge-EsdeRuntimeGameTags $target $entry.Node){$changed=$true}
+        foreach($attr in $entry.Node.Attributes){
+            $existing=$target.GetAttributeNode($attr.Name)
+            if($existing-and$existing.Value-cne$attr.Value){throw ('GAMELIST BLOCK: folder custom attribute collision '+$attr.Name)}
+            if(-not$existing){[void]$target.Attributes.Append($Result.Document.ImportNode($attr,$true));$changed=$true}
+        }
+        $usedOpaque=New-Object 'Collections.Generic.HashSet[System.Xml.XmlNode]'
+        $seenCustom=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach($child in $entry.Node.ChildNodes){
+            if($child.NodeType-in@('Whitespace','SignificantWhitespace')){continue}
+            if($child.NodeType-eq'Element'){
+                if($child.Name-cin@('playcount','playtime','lastplayed')){continue}
+                $existing=@($match[0].Node.ChildNodes|Where-Object {$_.NodeType-eq'Element'-and$_.Name-ceq$child.Name})
+                if($child.Name-cin@('path','name','desc')){
+                    # These observed/general metadata fields retain the master value.
+                    # Complex local payload must never be silently discarded.
+                    if($existing.Count){
+                        if($child.Attributes.Count-or@($child.ChildNodes|Where-Object {$_.NodeType-cnotin@('Text','CDATA','Whitespace','SignificantWhitespace')}).Count){if($existing[0].OuterXml-cne$child.OuterXml){throw 'GAMELIST BLOCK: complex local folder field collision'}}
+                        continue
+                    }
+                }elseif($existing.Count){
+                    if($existing.Count-ne1-or-not$seenCustom.Add($child.Name)-or$existing[0].OuterXml-cne$child.OuterXml){throw ('GAMELIST BLOCK: folder custom field collision '+$child.Name)}
+                    continue
+                }
+            }else{
+                $opaque=@($match[0].Node.ChildNodes|Where-Object {$_.NodeType-ne'Element'-and$_.OuterXml-ceq$child.OuterXml-and-not$usedOpaque.Contains($_)})
+                if($opaque.Count){[void]$usedOpaque.Add($opaque[0]);continue}
+            }
+            [void]$target.AppendChild($Result.Document.ImportNode($child,$true));$changed=$true
+        }
+    }
+    return $changed
+}
 function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$PreservedUnmanagedPaths=@()) {
     $warnings=New-Object 'Collections.Generic.List[string]'
     $emit={param($message)$warnings.Add($message);if($Warning){& $Warning $message|Out-Null}}.GetNewClosure()
+    $baseFolders=@(Get-EsdeFolderEntries $Base)
+    $localFolders=@(Get-EsdeFolderEntries $Local)
     $baseEntries=@(Get-EsdeGameEntries $Base $emit)
     $unmanaged=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach($path in $PreservedUnmanagedPaths){
@@ -854,7 +915,7 @@ function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$Preser
     $localEntries=@(Get-EsdeGameEntries $Local $emit|Where-Object {$_.Class-in@('LocalTest','LocalUnregistered') -or $unmanaged.Contains($_.Key)})
     $localAlternative=@(if($Local){$Local.Document.DocumentElement.SelectNodes('alternativeEmulator')})
     if($localAlternative.Count-gt1){throw 'Android alternativeEmulator 중복'}
-    if($null-eq$Base -and $localEntries.Count-eq0 -and $localAlternative.Count-eq0){return $null}
+    if($null-eq$Base -and $localEntries.Count-eq0 -and $localAlternative.Count-eq0 -and $localFolders.Count-eq0){return $null}
     $template=if($null-ne$Base){$Base}else{$Local}
     $result=ConvertFrom-EsdeGamelistBytes $template.Bytes 'merge copy'
     $result.Document=$template.Document.CloneNode($true)
@@ -900,6 +961,7 @@ function Merge-EsdeGamelist($Base,$Local,[scriptblock]$Warning,[string[]]$Preser
         }
         $changed=$true
     }
+    if(Merge-EsdeFolderMetadata $result $baseFolders $localFolders){$changed=$true}
     $result.Bytes=if($changed){ConvertTo-EsdeGamelistBytes $result}else{$template.Bytes}
     [void](ConvertFrom-EsdeGamelistBytes $result.Bytes 'merge verification')
     $result|Add-Member -NotePropertyName Warnings -NotePropertyValue @($warnings.ToArray())
@@ -1267,29 +1329,12 @@ function New-RenamePromotionProposal($Entry,[object[]]$AndroidInventory,$Android
     if(-not$p.AssetPlan.Safe){$p.Reason=$p.AssetPlan.Reason;return $p}
     if(-not$p.MediaPlan.Safe){$p.Reason=$p.MediaPlan.Reason;return $p}
     $p.PreparedXml=Get-PromotionBoundGamelist $AndroidXml $MasterXml $Entry.System ('./'+$Entry.RelativePath) ('./'+$p.CanonicalRelativePath)
-    $p.PreparedXml=Preserve-RenameFolderEvidence $p.PreparedXml $AndroidXml
     $p.XmlEvidence=Get-PromotionXmlEvidence $AndroidXml $MasterXml ('./'+$Entry.RelativePath) ('./'+$p.CanonicalRelativePath)
     $p.Operations=@([pscustomobject]@{Kind='ROM';Root=('/storage/emulated/0/ROMs/'+$Entry.System);SourceRelativePath=$Entry.RelativePath;DestinationRelativePath=$p.CanonicalRelativePath;ExpectedSha256=$Entry.AndroidSha256;System=$Entry.System})+@($p.AssetPlan.Operations)
     $p|Add-Member PreparedXmlSha (Get-MediaTextHash ([Convert]::ToBase64String($p.PreparedXml.Bytes)))
     $p|Add-Member PlanBinding (Get-RenamePlanBinding $p)
     $p.Eligible=$true;$p.Action='PROMOTE_WITH_RENAME';$p.Reason='verified rename proposal; complete supported mapping and no local media'
     return $p
-}
-function Preserve-RenameFolderEvidence($Bound,$Android) {
-    if(-not$Bound-or-not$Android){return $Bound}
-    $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $target=$Bound.Document.DocumentElement.SelectSingleNode('gameList')
-    foreach($folder in @($Android.Document.DocumentElement.SelectNodes('gameList/folder'))){
-        $paths=@($folder.SelectNodes('path'));if($paths.Count-ne1){throw 'RENAME BLOCK: folder path missing/duplicate'}
-        $key=(Get-EsdeGamePathInfo $paths[0].InnerText).Key
-        if((Get-EsdeGamePathInfo $paths[0].InnerText).Class-ceq'Invalid'-or-not$seen.Add($key)){throw 'RENAME BLOCK: folder collision/traversal'}
-        $existing=@($target.SelectNodes('folder')|Where-Object {if(-not$_.SelectSingleNode('path')){throw 'RENAME BLOCK: master folder path'};(Get-EsdeGamePathInfo $_.SelectSingleNode('path').InnerText).Key-ieq$key})
-        if($existing.Count-gt1){throw 'RENAME BLOCK: duplicate master folder'}
-        $copy=$Bound.Document.ImportNode($folder,$true)
-        if($existing.Count){[void]$target.ReplaceChild($copy,$existing[0])}else{[void]$target.AppendChild($copy)}
-    }
-    $Bound.Bytes=ConvertTo-EsdeGamelistBytes $Bound
-    return $Bound
 }
 function Get-RenamePlanBinding($Proposal) {
     return Get-MediaTextHash ($Proposal.System+'|'+$Proposal.SourceRelativePath+'|'+$Proposal.CanonicalRelativePath+'|'+($Proposal.Operations|ConvertTo-Json -Depth 8 -Compress)+'|'+$Proposal.PreparedXmlSha+'|'+($Proposal.XmlEvidence|ConvertTo-Json -Compress))
@@ -1981,7 +2026,6 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
         $master.Bytes=ConvertTo-EsdeGamelistBytes $master
     }
     $bound=Get-AndroidBoundGamelist $master $local $RomJob.System $preserve
-    if(@($promotions|Where-Object Action -CEQ PROMOTE_WITH_RENAME).Count){$bound=Preserve-RenameFolderEvidence $bound $initialLocal}
     $output=$null
     if($bound){$output=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-classified.xml');[void](Write-EsdeGamelist $bound $output)}
     $xml=$XmlPlan.PSObject.Copy();$xml.Output=$output

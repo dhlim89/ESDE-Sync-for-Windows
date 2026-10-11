@@ -53,7 +53,7 @@ $only=Merge-EsdeGamelist $null $android
 Check ((Count $only)-eq2 -and -not(Node $only './One.gb')) 'BASE 없음: local-only만 보존'
 $folderLocal=Fixture 'folder-only-base' ('<alternativeEmulator><label>Android SameBoy</label></alternativeEmulator><gameList><folder><path>./Normal</path><name>일반 폴더</name></folder>'+$test+'</gameList>')
 $folderResult=Merge-EsdeGamelist $null $folderLocal
-Check (-not$folderResult.Document.DocumentElement.SelectSingleNode('gameList/folder') -and (Count $folderResult)-eq1) 'BASE 없음: 일반 folder metadata도 승격하지 않음'
+Check ($folderResult.Document.DocumentElement.SelectSingleNode('gameList/folder/name').InnerText-ceq'일반 폴더' -and (Count $folderResult)-eq1) 'BASE 없음: folder metadata 보존, 일반 game 승격 없음'
 Check ($folderResult.Document.DocumentElement.SelectSingleNode('alternativeEmulator/label').InnerText-ceq'Android SameBoy') 'BASE 없음: Android top-level 구조 유지'
 Check ($null-eq(Merge-EsdeGamelist $null $null)) '둘 다 없음: 출력 없음'
 Check ($null-eq(Merge-EsdeGamelist $null (Fixture 'no-local' ('<gameList>'+$localNormal+'</gameList>')))) 'Android 일반 엔트리만 있으면 출력 없음'

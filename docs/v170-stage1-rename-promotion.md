@@ -141,3 +141,18 @@ canonical NEW node 1 / OLD node 0, runtime3·alternativeEmulator·display metada
 실제 runtime 근거는 Retroid Pocket Mini V2 + RetroArch/SameBoy GB 시험이며 다른 vendor/core로 일반화하지 않는다. slot/autostate와 local media rename/adoption은 지원 범위 밖이며 REVIEW가 정상이다. 새 v1.7.0 RC install/sync는 이번 checkpoint/package 단계에서 수행하지 않는다.
 
 진단 제한: 승격 후보의 기존 공통 LOCAL_ONLY_MANAGED_MATCH notice에는 보존/이름 변경 보류 문구가 남아 있다. 실제 PROMOTE_WITH_RENAME action과 transaction/completion 결과를 우선 확인한다. 성공 summary/GUI의 PromotedCount는 정확하다. 이 문구는 데이터 경로 결함의 증거가 아니며 이번 checkpoint 작업에서 동작을 변경하지 않는다.
+
+## Stage 3.2: 일반 Android-bound folder metadata 보존
+
+Release preflight evidence: `C:\esde-v170-live-2d1d1a97\PRE-SYNC-XML-SEMANTIC-REVIEW.json`. 기존 RC SHA `2b8e13b2e324739e28ea945807d1f92b522d9705406d4432ae04c9fbeb0cde11`는 blocked RC이며 정식 검증에 재사용하지 않는다. 원본 RC/evidence는 삭제하거나 덮어쓰지 않는다.
+
+원인은 master를 복제하는 `Merge-EsdeGamelist`가 Android folder를 이식하지 않고, `Preserve-RenameFolderEvidence`가 RENAME promotion에만 적용된 것이었다. 현재는 그 전용 helper와 두 call site를 제거하고 공통 merger의 `Get-EsdeFolderEntries` / `Merge-EsdeFolderMetadata`로 통합한다. `Get-AndroidBoundGamelist`, SAME_NAME, RENAME, UNMANAGED/REVIEW, 기존 legacy merger가 같은 folder 보존 정책을 사용한다. game merger/runtime/ROM policy는 유지한다.
+
+- 모든 Android-only folder는 whole-node로 보존한다. `_TEST`, `_UNREGISTERED`의 path/runtime/custom fields/attributes/comments도 포함한다. folder만 있는 XML도 보존하며 synthetic game이나 managed ROM을 생성하지 않는다.
+- 같은 normalized folder path는 master node가 base이다. 관측된 일반 metadata `path/name/desc`는 master가 기준이고, Android `playcount/playtime/lastplayed`는 기존 runtime tag-presence helper로 이식한다. empty/0도 그대로 보존한다.
+- Android-only custom children/attributes/comments는 병합한다. 양쪽에 충돌하는 unknown/custom data나 complex known field가 있으면 임의 삭제·선택 대신 BLOCK한다. master-only folder는 기존 bytes/policy를 유지한다.
+- 기존 case-sensitive relative path helper를 재사용한다. folder에만 선택적인 마지막 `/` 하나를 제거하여 `./_UNREGISTERED`, `_UNREGISTERED`, `./_UNREGISTERED/`가 같은 key를 갖게 한다. raw path를 일괄 재작성하지 않는다. game/file/traversal contract는 완화하지 않는다.
+- malformed XML, path 누락/중복/element path, traversal/absolute path, normalized duplicate 또는 case collision, duplicate known field는 fail-closed.
+- BASE 부재의 기존 일반 game metadata 미승격 정책은 유지한다. 과거 BASE 부재 folder 제거 테스트는 이번 명시적인 folder retention 정책에 맞게 갱신한다. folder metadata 보존은 ROM/game 자동 승격이 아니다.
+
+실제 blocked scenario는 RENAME 0 / SAME_NAME 0 / UNMANAGED move 1 / REVIEW 1, folder `./_UNREGISTERED`, lastplayed `20261011T093913`이다. 신규 fixture와 production read-only preview에서 folder 1→1 및 game semantic 동일 여부를 확인한다. 실제 install/sync나 Android/Dropbox mutation 없이 checkpoint/RC2를 준비한다. version/releaseTag는 1.7.0/v1.7.0 유지.
