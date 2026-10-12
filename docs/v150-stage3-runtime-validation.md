@@ -3,7 +3,7 @@
 결과: **PASS**. 제품 코드는 Stage 3 checkpoint
 1b2df0deb62fffdd433f2dd18fcd915579d9858f 그대로 사용했다.
 
-- 기기: Retroid Pocket Mini V2 / ADB serial 7b67d4e2.
+- 기기: Retroid Pocket Mini V2 / ADB serial <검증 기기 serial 비공개>.
 - 선택 system: gb. 변조 없는 기존 ROM의 격리 사본 1개만 사용했다.
 - source: ROMs/gb/ESDE_SYNC_UNMANAGED_CAT_TEST.gb.
 - destination: ROMs/gb/_UNREGISTERED/ESDE_SYNC_UNMANAGED_CAT_TEST.gb.

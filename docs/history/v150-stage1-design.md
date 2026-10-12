@@ -15,7 +15,7 @@ gamelist는 Dropbox BASE의 일반 whole-node + Android local-only whole-node �
 top-level alternativeEmulator와 game-level altemulator는 다른 노드다.
 
 ## 2. 관찰된 실제 자료
-선택 원본은 roms/gb와 roms/gbc. Android serial 7b67d4e2 / ES-DE 3.5.0-65(r52).
+선택 원본은 roms/gb와 roms/gbc. Android serial <검증 기기 serial 비공개> / ES-DE 3.5.0-65(r52).
 GB 40개, GBC 57개를 normalized path로 비교했다. XML은 두 top-level sibling 구조를 사용한다.
 GB 및 GBC 각각 2개 게임에서 플레이 기록 3개 태그가 다르며 다른 관찰 metadata는 동일하다.
 GB 피카츄: playcount 37→39, playtime 34432→34755, lastplayed 20261005T182332→20261006T225514.

@@ -90,7 +90,7 @@ MANAGED는 warning 없음. CONFLICT는 ROM version/revision/patch 확인 warning
 LOCAL_ONLY/UNMANAGED는 whole-node 정책, REVIEW는 원본 그대로 보존한다.
 
 ## 실제 Retroid 읽기 전용 조사 (2026-10-09)
-serial 7b67d4e2. GB managed 40/local-only 1, GBC managed 57. 나머지 classification은 모두 0.
+serial <검증 기기 serial 비공개>. GB managed 40/local-only 1, GBC managed 57. 나머지 classification은 모두 0.
 관리본 GB/GBC duplicate SHA group 0. 전후 source 및 Android ROM 경로/SHA 동일.
 GB local-only 1개는 이전 Stage 3 시험 자료이며 이동/삭제/정리하지 않았다.
 GBC source/Android에 .sav 2개가 있어 ROM count와 별도로 보존했다.

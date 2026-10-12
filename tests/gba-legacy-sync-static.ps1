@@ -10,13 +10,20 @@ $baseline=(& $git -C $repo show v1.4.9:sync-worker.ps1)|Out-String
 if($LASTEXITCODE-ne0){throw 'v1.4.9 baseline unavailable'}
 $old=[Management.Automation.Language.Parser]::ParseInput($baseline,[ref]$null,[ref]$null)
 function Definition($tree,$name){$tree.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst] -and $n.Name-ceq$name},$false)[0].Extent.Text}
+function WithoutPerf([string]$Text){
+    $Text=$Text.Replace([string][char]13,'').Replace('Get-PerfFileHash','Get-FileHash')
+    $Text=[regex]::Replace($Text,"(?m)^    \`$perfToken=Start-PerfPhase [^\n]+\n    try \{\n",'')
+    $Text=[regex]::Replace($Text,'(?m)^    \} finally \{ Stop-PerfPhase \$perfToken \}\n','')
+    $Text=[regex]::Replace($Text,'(?m)^\s*(Add-PerfCounter|Set-PerfWork|\$perfIndex=0)[^\n]*\n','')
+    return $Text
+}
 $oldMirror=Definition $old 'Mirror-SystemFolder'
 . ([scriptblock]::Create($oldMirror.Replace('function Mirror-SystemFolder(','function Mirror-V149Baseline(')))
 $n=0
 function Check($ok,$name){if(-not$ok){throw $name};$script:n++;'PASS: '+$name}
 Check ((Definition $ast 'Mirror-SystemFolder').Replace([string][char]13,'')-ceq$oldMirror.Replace([string][char]13,'')) 'v1.4.9 mirror body identical'
-foreach($name in @('Get-RemoteFiles','Get-RemoteDirs','Remove-RemoteFile','Remove-RemoteTree','Assert-RemotePath','Prepare-MediaPlan','Invoke-MediaTransaction')){
-    Check ((Definition $ast $name).Replace([string][char]13,'')-ceq(Definition $old $name).Replace([string][char]13,'')) ($name+' baseline unchanged')
+foreach($name in @('Get-RemoteFiles','Get-RemoteDirs','Remove-RemoteFile','Remove-RemoteTree','Assert-RemotePath','Invoke-MediaTransaction')){
+    Check ((WithoutPerf (Definition $ast $name))-ceq(WithoutPerf (Definition $old $name))) ($name+' baseline unchanged apart from diagnostics')
 }
 $root=Join-Path $env:TEMP ('gba-legacy-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory((Join-Path $root 'roms/gba'))

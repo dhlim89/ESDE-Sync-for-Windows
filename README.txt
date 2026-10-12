@@ -1,5 +1,10 @@
-ES-DE Sync for Android v1.7.0 Development
+﻿ES-DE Sync for Android v1.8.0 Development
 ======================================
+
+v1.8 Stage 4A: 성능 계측과 단계·처리 개수·파일명·경과 시간 표시 기반을 검증했습니다. 당시 최적화 전 baseline을 유지합니다. 설계: docs/v180-stage4a-performance-progress.md
+v1.8 Stage 4B 개발: Android batch inventory/SHA, 필요한 media staging, guard 기반 session SHA memo와 중복 snapshot 재사용을 적용합니다. mtime-only 판단·persistent cache·병렬 전송은 사용하지 않습니다. 설계: docs/v180-stage4b-inventory-hashing.md
+
+v1.8 Stage 4C 개발: semantic 동일 XML은 snapshot 재검사 후 전송을 생략합니다. 기존 ROM의 no-op 확인은 fresh native SHA를 사용하고, 실제 push 후 binary 검증은 유지합니다. 격리 GUI의 클릭→완료 시간을 별도로 기록하며, 종료 후 최종 status 재읽기와 marquee visual styles를 적용합니다. 수정 GUI 실기기 재확인에서 완료 summary와 normal/DuplicateScan progress 표시를 확인했습니다. no-op sync 및 읽기 전용 DuplicateScan 후 최종 SAFE 2회가 통과했습니다.
 
 프로그램
 --------
@@ -393,3 +398,11 @@ Stable v1.6.0 기록과 위 v1.5/v1.6 정책 설명은 개발 이력입니다. �
 [v1.7.0 Stage 3.2 folder metadata]
 Android folder metadata는 promotion 유무와 무관하게 공통 gamelist merger에서 보존합니다.
 Android-only folder(_TEST/_UNREGISTERED 포함)는 whole-node 보존하며 같은 path는 master metadata base와 Android runtime tag-presence를 병합합니다. custom metadata 충돌/duplicate/invalid path는 임의 삭제하지 않고 차단합니다. ROM/game 정책과 version 1.7.0은 유지합니다.
+
+v1.8.0 미등록 중복 ROM 관리
+- 미등록 중복 ROM 관리는 normal sync와 별도의 수동 기능입니다.
+- 중복 ROM 확인에서 목록을 검사하고 사용자가 체크한 안전한 항목만 처리합니다.
+- _TEST는 제외합니다. 저장 목적지 충돌, slot/autostate, 로컬 media, unsafe metadata는 검토 필요입니다.
+- 기존 runtime/folder metadata 정책과 저장 데이터 verified migration을 재사용합니다.
+- 실패 journal은 후속 정리 및 sync를 차단합니다. 자동 rollback/resume는 없습니다.
+- 격리 실기기에서 단일 SAFE_DELETE와 SAFE_MERGE_DELETE 및 migration 후 인게임 save/Save State load 검증을 완료했습니다.

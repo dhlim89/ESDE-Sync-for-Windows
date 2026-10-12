@@ -1,4 +1,4 @@
-# v1.7.0: 안전한 RENAME_ONLY 자동 승격
+﻿# v1.7.0: 안전한 RENAME_ONLY 자동 승격
 
 현재 개발 버전은 1.7.0 / v1.7.0이며 stable은 v1.6.0이다. Stage 3 production 연결과 실기기 자동 승격·실제 save/Save State load 검증까지 완료했다. 아래 Stage 1/3 준비 설명은 단계별 이력이며, 현재 활성 계약과 최종 증거는 마지막 절을 따른다.
 
@@ -88,11 +88,11 @@ production은 동일 이름 safe → 기존 v1.6 자동 승격, 다른 이름 �
 ## Stage 3 production 연결 (미커밋, version 1.6.0 유지)
 
 Stage 2 RENAME_ONLY 실기기 결과는 사용자 game save/Save State load 확인까지 PASS했다.
-Evidence: C:\esde-v170-263ad43d\rename-20261011-010226\FINAL-STATIC-PASS.json
+Evidence: <로컬 격리 evidence 경로 비공개>
 이 JSON은 static 증거이며 실제 load 성공은 후속 사용자 보고에 근거한다. 원본 evidence는 수정하지 않는다.
 
 자동 허용은 기존 SAME_NAME과 새 RENAME_ONLY만이다. _UNREGISTERED prefix를 제거한 상대 경로의 parent가 case-sensitive 동일하고, filename 및 basename은 달라야 한다. 확장자는 그대로 유지한다. PATH_ONLY/RENAME_AND_PATH/case-only/_TEST는 REVIEW이다.
-환경은 기존 Retroid 7b67d4e2 + GB/GBC + SameBoy 정확한 config fingerprint/override 없음/RetroArch 종료 증거를 재사용한다. rename에서는 실제 OLD local node의 altemulator도 검증한다. Stage 2 runtime load 증거는 Retroid SameBoy GB 시험이며 다른 vendor/core의 증거가 아니다.
+환경은 기존 Retroid <검증 기기 serial 비공개> + GB/GBC + SameBoy 정확한 config fingerprint/override 없음/RetroArch 종료 증거를 재사용한다. rename에서는 실제 OLD local node의 altemulator도 검증한다. Stage 2 runtime load 증거는 Retroid SameBoy GB 시험이며 다른 vendor/core의 증거가 아니다.
 
 Get-RenameProductionSnapshot은 전체 saves/states, Android GB/GBC content 및 기타 시스템의 .gb/.gbc basename, source content, 선택 system media를 읽는다. directory/root canonicalization, links, SHA/size, case duplicate를 fail-closed로 검사한다. 읽기 실패/불확실한 inventory는 REVIEW로 fallback한다. source/master/Android metadata collision은 기존 BLOCK을 유지한다.
 Get-RenameAssetPlan은 .srm/.rtc/.state만 계획한다. source 없음은 no-op; destination 존재는 동일 SHA여도 REVIEW. OLD/NEW basename + '.' sibling의 unknown suffix, slot/autostate, 다른 core/subdirectory/case variant는 REVIEW. 비슷한 접두사만 가진 다른 ROM의 state는 포함하지 않는다. 전체 SameBoy basename inventory로 다른 content와 save namespace를 공유하면 REVIEW.
@@ -125,11 +125,11 @@ Stage 3.1: Get-RenameContentPathEvidence는 정규화/traversal 검증 후 기�
 
 현재 활성 production 정책은 SAME_NAME(v1.6 경로 유지) 및 제한된 RENAME_ONLY이다. `_UNREGISTERED`만 대상이며 `_TEST`, PATH_ONLY, RENAME_AND_PATH, case-only, multiple candidate, unknown/custom metadata, ROM/save/state destination collision, slot/autostate, old local media, unsupported core/system, uncertain SameBoy environment는 REVIEW이다. XML malformed/collision, late evidence 변경은 기존 fail-closed BLOCK/recovery-needed 정책을 유지한다.
 
-RENAME_ONLY는 예약 prefix 이후 parent relative path가 case-sensitive 동일해야 한다. 동일 SHA·단일 same-system managed candidate·검증된 Retroid 7b67d4e2/SameBoy config·metadata SAFE·canonical destination 부재·완전한 content/save/state/media evidence가 필수다. `.srm`, `.rtc`, `.state`만 basename rename하며 첫 run media HOLD, Source/Dropbox write 0, completed 뒤 MANAGED 확인과 중복 push 억제를 적용한다. 별도 RenameCount 없이 PromotedCount에 포함한다.
+RENAME_ONLY는 예약 prefix 이후 parent relative path가 case-sensitive 동일해야 한다. 동일 SHA·단일 same-system managed candidate·검증된 Retroid <검증 기기 serial 비공개>/SameBoy config·metadata SAFE·canonical destination 부재·완전한 content/save/state/media evidence가 필수다. `.srm`, `.rtc`, `.state`만 basename rename하며 첫 run media HOLD, Source/Dropbox write 0, completed 뒤 MANAGED 확인과 중복 push 억제를 적용한다. 별도 RenameCount 없이 PromotedCount에 포함한다.
 
-- Stage 2 manual rename evidence: `C:\esde-v170-263ad43d`
-- Stage 3 auto fixture evidence: `C:\esde-v170-unique-4f8b6eec`
-- Actual auto result: `C:\esde-v170-unique-4f8b6eec\actual-auto-20261011-101037`
+- Stage 2 manual rename evidence: `<로컬 격리 evidence 경로 비공개>`
+- Stage 3 auto fixture evidence: `<로컬 격리 evidence 경로 비공개>`
+- Actual auto result: `<로컬 격리 evidence 경로 비공개>`
 - Static comparison: 위 actual 디렉터리의 `POST-STATIC-COMPARISON.json`, `XML-EXACT-STAGING-PROOF.json`, `POST-INVENTORY-PUSH-GUARD.json`
 - Final SAFE / gate evidence: `FINAL-AUTO-RENAME-STATIC-PASS.json`. 이 원본은 사용자 load 이전에 작성되어 UserLoadPending=true이며 수정하지 않는다.
 - 후속 사용자 확정(2026-10-11): 기존 게임 내 save 정상 인식, Save State 목록 정상, 실제 Save State load 성공. 이 문서에 사용자 확인을 기록하며 원본 evidence는 덮어쓰지 않는다.
@@ -144,7 +144,7 @@ canonical NEW node 1 / OLD node 0, runtime3·alternativeEmulator·display metada
 
 ## Stage 3.2: 일반 Android-bound folder metadata 보존
 
-Release preflight evidence: `C:\esde-v170-live-2d1d1a97\PRE-SYNC-XML-SEMANTIC-REVIEW.json`. 기존 RC SHA `2b8e13b2e324739e28ea945807d1f92b522d9705406d4432ae04c9fbeb0cde11`는 blocked RC이며 정식 검증에 재사용하지 않는다. 원본 RC/evidence는 삭제하거나 덮어쓰지 않는다.
+Release preflight evidence: `<로컬 격리 evidence 경로 비공개>`. 기존 RC SHA `2b8e13b2e324739e28ea945807d1f92b522d9705406d4432ae04c9fbeb0cde11`는 blocked RC이며 정식 검증에 재사용하지 않는다. 원본 RC/evidence는 삭제하거나 덮어쓰지 않는다.
 
 원인은 master를 복제하는 `Merge-EsdeGamelist`가 Android folder를 이식하지 않고, `Preserve-RenameFolderEvidence`가 RENAME promotion에만 적용된 것이었다. 현재는 그 전용 helper와 두 call site를 제거하고 공통 merger의 `Get-EsdeFolderEntries` / `Merge-EsdeFolderMetadata`로 통합한다. `Get-AndroidBoundGamelist`, SAME_NAME, RENAME, UNMANAGED/REVIEW, 기존 legacy merger가 같은 folder 보존 정책을 사용한다. game merger/runtime/ROM policy는 유지한다.
 

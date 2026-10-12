@@ -1,4 +1,4 @@
-# Repository Guidelines
+﻿# Repository Guidelines
 
 ## 언어와 변경 원칙
 
@@ -6,7 +6,7 @@
 
 ## 구성과 실행 환경
 
-현재 개발 기준은 **v1.7.0 RENAME_ONLY 개발** (stable 기준 v1.6.0)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
+현재 개발 기준은 **v1.8.0 release candidate** (이전 stable v1.7.0)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
 
 - `ESDE-Sync.ps1`: Windows Forms GUI, ADB 및 worker 실행.
 - `sync-worker.ps1`: ROM mirror, foreground 검사, gamelist 병합, media ownership의 runtime 원본.
@@ -60,3 +60,5 @@ _TEST는 manual-only, _UNREGISTERED는 일반 Android 비관리 ROM의 자동 �
 local-only가 있는 system의 media는 flat naming 정책 확인 전 전체 job을 보류하고 파일/metadata를 유지한다.
 Managed runtime3/alternativeEmulator subtree/GB·GBC staging mapping과 기존 안전장치를 유지한다.
 실제 데이터/이전 시험 자료 변경, commit/push/main/tag/Release/설치는 별도 승인 없이 하지 않는다.
+## v1.8 Duplicate Manager Stage 2
+normal sync와 별도 Operation/selection/journal을 사용한다. _TEST 완전 제외, 자동 정리 금지. 실제 기기 삭제·저장 이동·XML 변경은 Stage 3 별도 승인 전 금지한다. completed 이외 duplicate journal은 cleanup과 normal sync를 차단하며 자동 reverse/resume는 하지 않는다. 설계는 docs/v180-stage1-unregistered-duplicate-manager.md를 따른다.
