@@ -98,3 +98,25 @@ copy payload, `_TEST` 행 제외를 계속 검증한다. evidence는 자동 정�
 remote 결과는 **v1.8 Stage 3.1 REMOTE READY**만 사용할 수 있다.
 실제 GUI SAFE_DELETE와 SAFE_MERGE_DELETE 및 사용자 save/Save State load 확인은
 실기기 접근이 재개된 이후 별도 Stage 3에서 수행한다. version은 1.7.0을 유지한다.
+
+## Stage 3.3 worker CLI contract
+
+worker 최상위 param block에 GUI가 전달하는 세 인자가 누락되어 실제 DuplicateScan이
+parameter binding에서 차단됐다. 선언만 추가한다: `Operation`은 string/ValidateSet
+`Sync,DuplicateScan,DuplicateCleanup`, 기본 `Sync`; `SelectionFile`과
+`DuplicateRequestId`는 optional string이다. 기존 mandatory 인자 5개의 순서/타입을 유지한다.
+일반 sync는 새 인자를 요구하지 않는다. duplicate operation은 기존 dispatch를 사용한다.
+
+request id는 duplicate operation에서 기존 32자리 소문자 GUID 검사로 필수화한다.
+GUI는 scan/result/status의 requestId를 현재 요청과 대조한다. cleanup의 SelectionFile은
+StateDir 내부이며 schema/scanId/source-device identity/선택 행/selection binding과
+실행 직전 재검증을 거친다. request id 자체는 selection 권한 토큰이 아니다.
+기존 recovery gate 실패 시 DuplicateScan의 read-only recovery report 경로를 유지하며
+새 recovery operation은 추가하지 않는다.
+
+`tests/duplicate-cli-contract-static.ps1`는 실제 GUI Start-DuplicateTask가 생성한
+arguments를 캡처하고 실제 worker param block을 사용하는 별도 binding probe 프로세스로
+검증한다. probe 본문은 인자만 출력하여 실제 sync/cleanup을 실행하지 않는다.
+Scan/Cleanup, 기존 positional sync, 공백·한글 경로, invalid operation/request/selection,
+stale scan, `_TEST` 및 traversal 방어를 검증한다. 실제 기기에서는 기존 fixture의
+DuplicateScan만 허용한다. GUI cleanup/일반 sync는 이 단계에서 실행하지 않는다.

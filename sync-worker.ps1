@@ -3,7 +3,10 @@
     [Parameter(Mandatory=$true)][string]$Serial,
     [Parameter(Mandatory=$true)][string]$AdbPath,
     [Parameter(Mandatory=$true)][string]$StateDir,
-    [Parameter(Mandatory=$true)][string]$AppRoot
+    [Parameter(Mandatory=$true)][string]$AppRoot,
+    [ValidateSet('Sync','DuplicateScan','DuplicateCleanup')][string]$Operation = 'Sync',
+    [string]$SelectionFile,
+    [string]$DuplicateRequestId
 )
 
 $ErrorActionPreference = "Stop"
