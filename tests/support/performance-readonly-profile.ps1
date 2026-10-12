@@ -41,7 +41,7 @@ try {
     Add-PerfCounter 'ManagedRomCount' $summary.ManagedCount
     Add-PerfCounter 'LocalOnlyRomCount' $summary.LocalOnlyCount
     Add-PerfCounter 'ReviewRomCount' $summary.ReviewCount
-    @{Summary=$summary;HeldMediaSystems=$held;Moves=@($plans|ForEach-Object Moves).Count;Promotions=@($plans|ForEach-Object Promotions).Count;MediaKinds=@($mediaPlan.Operations|Group-Object kind|Select-Object Name,Count);ActualMutation=0;SyncExecuted=$false}|ConvertTo-Json -Depth 12|Set-Content (Join-Path $Evidence 'plan.json') -Encoding UTF8
+    @{Summary=$summary;HeldMediaSystems=$held;Moves=@($plans|ForEach-Object Moves).Count;Promotions=@($plans|ForEach-Object Promotions).Count;MediaKinds=@($mediaPlan|Group-Object kind|Select-Object Name,Count);PlannedMediaMutationCount=@($mediaPlan|Where-Object kind -cin @('create','update','delete')).Count;PlannedXmlMutationCount=@($plans|Where-Object {$xml=$_.XmlPlan;if($xml.Output){-not$xml.Present-or-not(Test-GamelistSemanticEqual $xml.Pulled $xml.Output)}else{$xml.Present}}).Count;ActualMutation=0;SyncExecuted=$false}|ConvertTo-Json -Depth 12|Set-Content (Join-Path $Evidence 'plan.json') -Encoding UTF8
     Write-Status 'done' '읽기 전용 baseline 완료' 1 1 $summary
 } finally {Close-InventorySession;Write-PerfSummary;if($mediaContext){Close-MediaSession $mediaContext}}
 Copy-Item (Join-Path $Evidence 'performance-baseline.json') (Join-Path $Evidence 'normal-performance.json')

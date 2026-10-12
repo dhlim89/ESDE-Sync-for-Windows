@@ -3,6 +3,7 @@
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot 'update-common.ps1')
@@ -134,7 +135,35 @@ function New-DuplicateResultDialog($Result) {
     $close=New-Object Windows.Forms.Button;$close.Text='닫기';$close.SetBounds(334,256,120,34);$close.Add_Click({$form.Close()}.GetNewClosure())
     $form.Controls.AddRange(@($text,$copy,$close));$form.Tag=[pscustomobject]@{Text=$text;Copy=$copy;Close=$close};return $form
 }
+function Read-FinalSyncStatus([string]$Path) {
+    # Only consume authoritative terminal status after the worker has exited.
+    # The last timer frame may still be restarting and contain no summary.
+    $result=Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json
+    if($result.state-cne'done'-or[int]$result.percent-ne100-or[int]$result.current-ne[int]$result.total){throw '최종 동기화 상태를 확인할 수 없습니다. status.json과 로그를 확인해 주세요.'}
+    return $result
+}
+
+function Start-GuiOperationProfile([string]$Mode) {
+    $script:GuiOperationProfile=[ordered]@{operation=$Mode;clickedAtUtc=[DateTime]::UtcNow.ToString('o');workerStartedAtUtc=$null;completedAtUtc=$null;elapsedMs=$null}
+    $script:GuiOperationClock=[Diagnostics.Stopwatch]::StartNew()
+}
+function Complete-GuiOperationProfile {
+    if(-not$script:GuiOperationProfile){return}
+    $script:GuiOperationClock.Stop()
+    $script:GuiOperationProfile.completedAtUtc=[DateTime]::UtcNow.ToString('o')
+    $script:GuiOperationProfile.elapsedMs=$script:GuiOperationClock.ElapsedMilliseconds
+    try{[IO.File]::WriteAllText((Join-Path $StateDir ('gui-performance-'+$script:GuiOperationProfile.operation+'.json')),($script:GuiOperationProfile|ConvertTo-Json),(New-Object Text.UTF8Encoding($true)))}catch{}
+}
+
+function Reset-DuplicateProgress($Bar) {
+    $Bar.Visible=$true
+    $Bar.Value=0
+    $Bar.MarqueeAnimationSpeed=30
+    $Bar.Style=[Windows.Forms.ProgressBarStyle]::Marquee
+}
+
 function Start-DuplicateTask([string]$Mode,$Scan,[string[]]$Ids=@()) {
+    Start-GuiOperationProfile $Mode
     if($script:WorkerProcess-or$script:DuplicateProcess-or$script:UpdateBusy-or$script:UpdateInstalling-or$script:StartupPending){throw '다른 작업이 끝난 뒤 중복 관리를 실행해 주세요.'}
     if(-not$script:Adb-or$deviceCombo.SelectedIndex-lt0){throw 'Android 기기를 선택하세요.'}
     $dev=$script:Devices[$deviceCombo.SelectedIndex];if($dev.State-cne'device'){throw 'USB 디버깅 승인이 필요합니다.'}
@@ -148,7 +177,9 @@ function Start-DuplicateTask([string]$Mode,$Scan,[string[]]$Ids=@()) {
     if($selectionPath){$args+=@('-SelectionFile',('"'+$selectionPath+'"'))}
     $script:DuplicateRequestId=[guid]::NewGuid().ToString('N');$args+=@('-DuplicateRequestId',$script:DuplicateRequestId)
     $script:DuplicateMode=$Mode
+    if($progress){Reset-DuplicateProgress $progress}
     $script:DuplicateProcess=Start-Process powershell.exe -ArgumentList ($args-join' ') -WindowStyle Hidden -PassThru
+    $script:GuiOperationProfile.workerStartedAtUtc=[DateTime]::UtcNow.ToString('o')
     $syncBtn.Enabled=$false;$duplicateBtn.Enabled=$false;$updateBtn.Enabled=$false;$installUpdateBtn.Enabled=$false
     $statusLabel.Text=if($Mode-ceq'DuplicateScan'){'중복 ROM 검사 중...'}else{'선택한 중복 ROM 정리 중...'}
 }
@@ -553,6 +584,7 @@ $refreshBtn.Add_Click({ Refresh-Devices })
 $duplicateBtn.Add_Click({try{Start-DuplicateTask 'DuplicateScan' $null}catch{[void][Windows.Forms.MessageBox]::Show($_.Exception.Message,'중복 검사 실패')}})
 
 $syncBtn.Add_Click({
+    Start-GuiOperationProfile 'Sync'
     try {
         if ($script:DuplicateProcess -or $script:UpdateBusy -or $script:UpdateInstalling -or $script:StartupPending) { throw '업데이트 또는 복구 작업 중에는 동기화를 시작할 수 없습니다.' }
         $source = $sourceBox.Text.Trim()
@@ -580,6 +612,7 @@ $syncBtn.Add_Click({
         ) -join " "
 
         $script:WorkerProcess = Start-Process powershell.exe -ArgumentList $args -WindowStyle Hidden -PassThru
+        $script:GuiOperationProfile.workerStartedAtUtc=[DateTime]::UtcNow.ToString('o')
         $syncBtn.Enabled = $false
         $progress.Value = 0
         $statusLabel.Text = "동기화 중..."
@@ -602,7 +635,9 @@ $timer.Add_Tick({
             return
         }
         $progress.Style=[Windows.Forms.ProgressBarStyle]::Continuous
+        if($script:DuplicateMode-cne'DuplicateScan'){Complete-GuiOperationProfile}
         $code=$script:DuplicateProcess.ExitCode;$script:DuplicateProcess=$null
+        $progress.Value=if($code-eq0){100}else{0}
         $syncBtn.Enabled=-not$script:StartupPending-and-not$script:UpdateBusy;$duplicateBtn.Enabled=$syncBtn.Enabled
         $installUpdateBtn.Enabled=[bool]$script:VerifiedPackage;$updateBtn.Enabled=[bool]$script:UpdateCandidate
         if($script:DuplicateMode-ceq'DuplicateScan'){
@@ -612,6 +647,7 @@ $timer.Add_Tick({
             $statusLabel.Text=('관리 ROM과 중복된 미등록 ROM '+$scan.DuplicateUnregisteredCount+'개가 있습니다.')
             $execute={param($ids)Start-DuplicateTask 'DuplicateCleanup' $scan $ids}.GetNewClosure()
             $script:DuplicateDialog=New-DuplicateManagerDialog $scan $execute
+            Complete-GuiOperationProfile
             [void]$script:DuplicateDialog.Dialog.ShowDialog($form);$script:DuplicateDialog.Dialog.Dispose();$script:DuplicateDialog=$null
         }else{
             if($script:DuplicateDialog){$script:DuplicateDialog.Busy=$false;$script:DuplicateDialog.Dialog.Close()}
@@ -648,10 +684,13 @@ $timer.Add_Tick({
     }
 
     if ($script:WorkerProcess.HasExited) {
+        Complete-GuiOperationProfile
         $code = $script:WorkerProcess.ExitCode
         $script:WorkerProcess = $null
         $syncBtn.Enabled = -not $script:UpdateBusy -and -not $script:UpdateInstalling -and -not $script:StartupPending
         if ($code -eq 0) {
+            try{$st=Read-FinalSyncStatus $StatusFile}
+            catch{$statusLabel.Text='완료 상태 확인 필요';[void][Windows.Forms.MessageBox]::Show($_.Exception.Message,'동기화 결과 확인 필요');return}
             $progress.Style=[Windows.Forms.ProgressBarStyle]::Continuous
             $progress.Value = 100
             $statusLabel.Text = "동기화 완료"

@@ -228,25 +228,30 @@ function Write-PerfProgress([switch]$Force) {
 function Get-PerfFileHash {
     param([Parameter(Position=0)][string]$Path,[string]$LiteralPath,[string]$Algorithm='SHA256')
     $memoKey=$null
+    $guardClock=[Diagnostics.Stopwatch]::StartNew()
     if($LiteralPath-and$Algorithm-ceq'SHA256'-and(Test-InventorySession)-and$LiteralPath.StartsWith($SourceRoot.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)-and-not@(Get-PSCallStack|Where-Object {$_.FunctionName-match'^(Invoke-Verified|Get-AndroidBatchInventory|Read-ClassificationRom|Get-MediaRemoteHash|Get-DuplicateDeleteEvidence|Assert-DuplicateProductionEvidence|Assert-PromotionEvidence|Send-ClassifiedManagedFile|Set-MediaRemoteFile|Invoke-MediaTransaction)'}).Count){
         $info=Get-Item -LiteralPath $LiteralPath -Force
         Assert-LocalSourcePath $info.FullName $SourceRoot ([long]$info.Attributes)
         # A fingerprint alone is insufficient: keep a read-only, deny-write/delete handle.
         $handle=New-Object IO.FileStream($info.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-        try{$identity=Get-SourceHandleIdentity $handle}catch{$identity=$null}
+        $identityClock=[Diagnostics.Stopwatch]::StartNew()
+        try{$identity=Get-SourceHandleIdentity $handle}catch{$identity=$null}finally{Add-PerfCounter 'SourceIdentityCheckCount';Add-PerfCounter 'SourceIdentityElapsedUs' ([long]($identityClock.Elapsed.TotalMilliseconds*1000))}
         if($identity){
             $memoKey=$info.FullName+'|'+$identity+'|'+$info.Length+'|'+$info.LastWriteTimeUtc.Ticks
-            if($script:InventorySession.sourceHashes.ContainsKey($memoKey)){$handle.Dispose();Add-PerfCounter 'SourceHashMemoHits';return $script:InventorySession.sourceHashes[$memoKey]}
+            if($script:InventorySession.sourceHashes.ContainsKey($memoKey)){$handle.Dispose();Add-PerfCounter 'SourceHashMemoHits';Add-PerfCounter 'SourceGuardElapsedUs' ([long]($guardClock.Elapsed.TotalMilliseconds*1000));return $script:InventorySession.sourceHashes[$memoKey]}
             [void]$script:InventorySession.handles.Add($handle)
         }else{$handle.Dispose();Add-PerfCounter 'SourceMemoIdentityFallback'}
     }
+    Add-PerfCounter 'SourceGuardElapsedUs' ([long]($guardClock.Elapsed.TotalMilliseconds*1000))
     Add-PerfCounter 'TotalHashCount';Add-PerfCounter 'LocalFileHashCount'
     Add-PerfMutationHash 1
     $name=if($LiteralPath){$LiteralPath}else{$Path}
     $callers=if($null-ne$script:Perf){@(Get-PSCallStack|Select-Object -ExpandProperty FunctionName)}else{@()}
     $category=if($callers-ccontains'Read-ClassificationRom'){'AndroidRomHashCount'}elseif($callers-ccontains'Get-MediaRemoteHash'){'AndroidMediaHashCount'}elseif($callers-ccontains'Get-MediaSourceFiles'-and$name.EndsWith('.source')){'SourceMediaStagingHashCount'}elseif($name-match'[/\\]roms[/\\]'){'SourceRomHashCount'}elseif($name-match'[/\\]downloaded_media[/\\]'){'SourceMediaHashCount'}elseif($name-match'\.(srm|rtc|state)$'){'SaveStateHashCount'}else{'OtherFileHashCount'}
     Add-PerfCounter $category
+    $hashClock=[Diagnostics.Stopwatch]::StartNew()
     $hash=if($LiteralPath){Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm}else{Get-FileHash -Path $Path -Algorithm $Algorithm}
+    Add-PerfCounter ($category+'ElapsedUs') ([long]($hashClock.Elapsed.TotalMilliseconds*1000))
     if($memoKey){$script:InventorySession.sourceHashes[$memoKey]=$hash}
     return $hash
 }
@@ -569,6 +574,8 @@ function Preflight-CheckForeground {
     } finally { Stop-PerfPhase $perfToken }
 }
 function Stop-Esde {
+    $stage4cPhase=Start-PerfPhase 'Stop-Esde' 'ES-DE 종료'
+    try {
     Write-Status "stopping" "ES-DE를 종료하는 중..." 0 1
     Write-Log "STOP APP [ES-DE] org.es_de.frontend"
 
@@ -576,6 +583,8 @@ function Stop-Esde {
     if ($r.Code -ne 0) {
         throw "ES-DE 종료 실패.`r`n$($r.StdErr)"
     }
+
+    } finally { Stop-PerfPhase $stage4cPhase }
 }
 
 function Start-Esde {
@@ -589,6 +598,7 @@ function Start-Esde {
         throw "ES-DE 재실행에 실패했습니다.`r`n$($r.StdErr)"
     }
     } finally { Stop-PerfPhase $perfToken }
+
 }
 
 $LocalOnlyFolders = @('_TEST', '_UNREGISTERED')
@@ -1267,6 +1277,8 @@ function Is-ClassificationAuxiliaryPath([string]$Path) {
 }
 
 function New-UnregisteredClassificationPlan([string]$System,[object[]]$Source,[object[]]$Android,[object[]]$Destinations,[string[]]$Systems) {
+    $stage4cPhase=Start-PerfPhase 'New-UnregisteredClassificationPlan' 'ROM 분류 비교'
+    try {
     if((Get-RomClassificationCapability $System).Status-cne'Supported'){throw 'CLASSIFICATION BLOCK: planner requires supported capability'}
     $index=New-ManagedRomShaIndex $System $Source $Systems
     $managed=$index.Paths
@@ -1318,6 +1330,8 @@ function New-UnregisteredClassificationPlan([string]$System,[object[]]$Source,[o
         $result.Status=$result.Classification;$plan+=$result
     }
     return @($plan)
+
+    } finally { Stop-PerfPhase $stage4cPhase }
 }
 
 function New-ManagedRomShaIndex([string]$System,[object[]]$Source,[string[]]$Systems) {
@@ -2311,8 +2325,12 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
 }
 
 function Assert-ClassificationSourceSnapshot($Plan) {
+    $stage4cPhase=Start-PerfPhase 'Assert-ClassificationSourceSnapshot' '원본 ROM 재검증'
+    try {
     $current=@(Get-ClassificationSourceRows $Plan.RomJob)
     if(($current|Select-Object RelativePath,Sha256|ConvertTo-Json -Compress)-cne($Plan.Source|Select-Object RelativePath,Sha256|ConvertTo-Json -Compress)){throw 'CLASSIFICATION BLOCK: managed source changed'}
+
+    } finally { Stop-PerfPhase $stage4cPhase }
 }
 
 function Invoke-ClassificationMoves([object[]]$Plans,$Context,[string]$Session) {
@@ -2376,6 +2394,8 @@ function Invoke-ClassificationMoves([object[]]$Plans,$Context,[string]$Session) 
 }
 
 function Confirm-ClassificationInventory($Plan,[string]$Session) {
+    $stage4cPhase=Start-PerfPhase 'Confirm-ClassificationInventory' 'ROM 최종 목록 검증'
+    try {
     Assert-ClassificationSourceSnapshot $Plan
     $rows=@(Get-ClassificationAndroidRows $Plan.RomJob $Session -IncludeLocalOnly)
     $refresh=@(New-UnregisteredClassificationPlan $Plan.System $Plan.Source $rows @() $selectedSystems)
@@ -2393,6 +2413,8 @@ function Confirm-ClassificationInventory($Plan,[string]$Session) {
         $actual=@(ConvertTo-Json -InputObject @($refresh|Where-Object {$movedPaths-cnotcontains$_.RelativePath}|Sort-Object RelativePath|Select-Object RelativePath,Sha256,Classification) -Compress)
     }
     if(($expected -join '')-cne($actual -join '')){throw 'CLASSIFICATION BLOCK: ROM inventory changed after prepare'}
+
+    } finally { Stop-PerfPhase $stage4cPhase }
 }
 
 function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
@@ -2409,6 +2431,7 @@ function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
     $dirFilter={param($path)if($path-cne$root){throw 'mirror root mismatch'}; & $dirs $path|Where-Object {-not(Is-LocalOnlyRelativePath $_)}}.GetNewClosure()
     Set-Item Function:local:Get-RemoteFiles -Value $fileFilter
     Set-Item Function:local:Get-RemoteDirs -Value $dirFilter
+    $transferWork=@{current=0;total=$transfer.Count}
     # The old fast path pushes a directory. Intercept it rather than weakening Mirror-SystemFolder.
     $pushFilter={
         param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
@@ -2417,6 +2440,7 @@ function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
             if(Test-Path -LiteralPath $inputPath -PathType Container){
                 if([IO.Path]::GetFullPath($inputPath).TrimEnd('\')-cne[IO.Path]::GetFullPath($Job.LocalPath).TrimEnd('\')){throw 'mirror push scope mismatch'}
                 foreach($row in $transfer){
+                    Set-PerfWork (++$transferWork.current) $transferWork.total ($Job.System+'/'+$row.RelativePath)
                     $destination=$root+'/'+$row.RelativePath
                     $r=Send-ClassifiedManagedFile $row $destination $Plan.Session $adb
                     if($r.Code-ne0){return $r}
@@ -2426,6 +2450,7 @@ function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
             $relative=$inputPath.Substring($Job.LocalPath.Length).TrimStart('\','/').Replace('\','/')
             if(-not$allowed.Contains($relative)){return [pscustomobject]@{Code=0;StdOut='';StdErr='';Output=@()}}
             $row=@($transfer|Where-Object RelativePath -CEQ $relative)[0]
+            Set-PerfWork (++$transferWork.current) $transferWork.total ($Job.System+'/'+$row.RelativePath)
             return (Send-ClassifiedManagedFile $row ($root+'/'+$relative) $Plan.Session $adb)
         }
         & $adb @Args
@@ -2437,7 +2462,7 @@ function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
 function Send-ClassifiedManagedFile($Row,[string]$Remote,[string]$Session,[scriptblock]$Adb) {
     $unchanged=[pscustomobject]@{Code=0;StdOut='';StdErr='';Output=@()}
     if((Get-PerfFileHash -LiteralPath $Row.FullName).Hash.ToLowerInvariant()-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: managed source changed before push'}
-    $current=Read-ClassificationRom $Remote $Session
+    $current=Read-ClassificationRom $Remote $Session -PlanningOnly
     if($current){
         if($current.Sha256-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: concurrent MANAGED_CONFLICT before push'}
         return $unchanged
@@ -2599,6 +2624,22 @@ function Assert-GamelistSnapshot($Plan) {
     }
 }
 
+function Get-GamelistSemanticToken($Node) {
+    # Ignore formatting whitespace and game/folder ordering only. Preserve custom
+    # content, attributes, comments, empty/zero values and top-level sibling order.
+    if($Node.NodeType-eq[Xml.XmlNodeType]::Whitespace -and $Node.ParentNode -and @($Node.ParentNode.ChildNodes|Where-Object NodeType -eq Element).Count-gt0 -and $Node.ParentNode.GetAttribute('space','http://www.w3.org/XML/1998/namespace')-cne'preserve'){return ''}
+    $attrs=@();if($Node.Attributes){$attrs=@($Node.Attributes|Sort-Object Name|ForEach-Object {@($_.Name,$_.Value)})}
+    $children=@($Node.ChildNodes|ForEach-Object {Get-GamelistSemanticToken $_}|Where-Object {$_-cne''})
+    if($Node.get_Name()-ceq'gameList' -and @($Node.ChildNodes|Where-Object {$_.NodeType-eq[Xml.XmlNodeType]::Element-and$_.get_Name()-cnotin@('game','folder')}).Count-eq0 -and @($Node.ChildNodes|Where-Object {$_.NodeType-notin@([Xml.XmlNodeType]::Element,[Xml.XmlNodeType]::Whitespace)}).Count-eq0){$children=@($children|Sort-Object)}
+    if($Node.get_Name()-cin@('game','folder') -and @($Node.ChildNodes|Where-Object {$_.NodeType-notin@([Xml.XmlNodeType]::Element,[Xml.XmlNodeType]::Whitespace)}).Count-eq0 -and @($Node.ChildNodes|Where-Object NodeType -eq Element|Group-Object -Property {$_.get_Name()}|Where-Object Count -gt 1).Count-eq0){$children=@($children|Sort-Object)}
+    return ConvertTo-Json -InputObject @([int]$Node.NodeType,$Node.get_Name(),$Node.Value,$attrs,$children) -Depth 80 -Compress
+}
+
+function Test-GamelistSemanticEqual([string]$First,[string]$Second) {
+    $left=Read-EsdeGamelist $First;$right=Read-EsdeGamelist $Second
+    return (Get-GamelistSemanticToken $left.Document.DocumentElement)-ceq(Get-GamelistSemanticToken $right.Document.DocumentElement)
+}
+
 function Sync-GamelistSystem($Plan) {
     $perfToken=Start-PerfPhase 'Sync-GamelistSystem' 'gamelist 전송 검증'
     try {
@@ -2615,6 +2656,12 @@ function Sync-GamelistSystem($Plan) {
             Remove-RemoteFile $Plan.RemoteFile
             # 기존 경로 검증은 시스템 루트 rmdir도 막는다. 폴더/unknown 파일은 그대로 둔다.
         }else{Write-Log ('GAMELIST '+$Plan.System+': ACTION: no-op')}
+        return
+    }
+    if($Plan.Present -and $Plan.Pulled -and (Test-GamelistSemanticEqual $Plan.Pulled $Plan.Output)){
+        Assert-GamelistSnapshot $Plan
+        Write-Log ('GAMELIST '+$Plan.System+': ACTION: no-op (semantic unchanged, snapshot verified)')
+        Add-PerfCounter 'GamelistNoOpCount'
         return
     }
     [void]@(Get-EsdeGameEntries (Read-EsdeGamelist $Plan.Output))

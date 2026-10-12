@@ -4,6 +4,8 @@
 v1.8 Stage 4A: 성능 계측과 단계·처리 개수·파일명·경과 시간 표시 기반을 검증했습니다. 당시 최적화 전 baseline을 유지합니다. 설계: docs/v180-stage4a-performance-progress.md
 v1.8 Stage 4B 개발: Android batch inventory/SHA, 필요한 media staging, guard 기반 session SHA memo와 중복 snapshot 재사용을 적용합니다. mtime-only 판단·persistent cache·병렬 전송은 사용하지 않습니다. 설계: docs/v180-stage4b-inventory-hashing.md
 
+v1.8 Stage 4C 개발: semantic 동일 XML은 snapshot 재검사 후 전송을 생략합니다. 기존 ROM의 no-op 확인은 fresh native SHA를 사용하고, 실제 push 후 binary 검증은 유지합니다. 격리 GUI의 클릭→완료 시간을 별도로 기록하며, 종료 후 최종 status 재읽기와 marquee visual styles를 적용합니다. 수정 GUI 실기기 재확인에서 완료 summary와 normal/DuplicateScan progress 표시를 확인했습니다. no-op sync 및 읽기 전용 DuplicateScan 후 최종 SAFE 2회가 통과했습니다.
+
 프로그램
 --------
 ES-DE Sync
