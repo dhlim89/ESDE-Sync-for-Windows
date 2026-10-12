@@ -1,6 +1,8 @@
 ﻿ES-DE Sync for Android v1.7.0 Development
 ======================================
 
+v1.8 Stage 4A 개발: 성능 계측과 단계·처리 개수·파일명·경과 시간 표시를 추가합니다. 안전 정책과 version 1.7.0은 유지하며 batch/selective SHA 최적화는 아직 적용하지 않습니다. 설계: docs/v180-stage4a-performance-progress.md
+
 프로그램
 --------
 ES-DE Sync

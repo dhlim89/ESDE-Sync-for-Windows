@@ -253,11 +253,21 @@ function Get-EsdeGuiLayout {
             info=@(30,220,690,84)
             updateLabel=@(30,316,565,32);updateBtn=@(610,316,110,32);installUpdateBtn=@(610,316,110,32)
             warn=@(30,358,690,40);syncBtn=@(30,410,480,44);duplicateBtn=@(520,410,200,44)
-            progress=@(30,468,690,22);statusLabel=@(30,500,690,26);logBox=@(30,538,690,110)
+            progress=@(30,468,690,22);statusLabel=@(30,498,690,38);logBox=@(30,538,690,110)
         }
     }
 }
 
+function Get-WorkerProgressPresentation($Status) {
+    $percent=if($null-ne$Status.overallPercent){[int]$Status.overallPercent}else{[int]$Status.percent}
+    $text=[string]$Status.message
+    if($null-ne$Status.elapsedMs){
+        $count=if($Status.phaseTotal-gt0){' '+$Status.phaseCurrent+' / '+$Status.phaseTotal}else{' 확인 중'}
+        $text='전체 '+$percent+'% · '+$Status.phaseLabel+$count+' · 경과 '+[TimeSpan]::FromMilliseconds([double]$Status.elapsedMs).ToString('hh\:mm\:ss')
+        if($Status.currentItem){$text+="`r`n"+$Status.currentItem}
+    }
+    [pscustomobject]@{Text=$text;Percent=[math]::Max(0,[math]::Min(100,$percent));Indeterminate=([bool]$Status.indeterminate-and$Status.state-cnotin@('done','error'))}
+}
 function Set-EsdeGuiLayout($Form,[hashtable]$Controls) {
     $layout=Get-EsdeGuiLayout
     $Form.AutoScaleDimensions=New-Object System.Drawing.SizeF(96,96)
@@ -584,7 +594,14 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 600
 $timer.Add_Tick({
     if($script:DuplicateProcess){
-        if(-not$script:DuplicateProcess.HasExited){return}
+        if(-not$script:DuplicateProcess.HasExited){
+            try{
+                $st=Get-Content (Join-Path $StateDir 'duplicate-status.json') -Raw -Encoding UTF8|ConvertFrom-Json
+                if($st.requestId-ceq$script:DuplicateRequestId){$presentation=Get-WorkerProgressPresentation $st;$statusLabel.Text=$presentation.Text;$progress.Style=if($presentation.Indeterminate){[Windows.Forms.ProgressBarStyle]::Marquee}else{[Windows.Forms.ProgressBarStyle]::Continuous};$progress.Value=$presentation.Percent}
+            }catch{}
+            return
+        }
+        $progress.Style=[Windows.Forms.ProgressBarStyle]::Continuous
         $code=$script:DuplicateProcess.ExitCode;$script:DuplicateProcess=$null
         $syncBtn.Enabled=-not$script:StartupPending-and-not$script:UpdateBusy;$duplicateBtn.Enabled=$syncBtn.Enabled
         $installUpdateBtn.Enabled=[bool]$script:VerifiedPackage;$updateBtn.Enabled=[bool]$script:UpdateCandidate
@@ -611,8 +628,10 @@ $timer.Add_Tick({
     if (Test-Path $StatusFile) {
         try {
             $st = Get-Content $StatusFile -Raw -Encoding UTF8 | ConvertFrom-Json
-            $statusLabel.Text = $st.message
-            $p = [int]$st.percent
+            $presentation=Get-WorkerProgressPresentation $st
+            $statusLabel.Text=$presentation.Text
+            $p=$presentation.Percent
+            $progress.Style=if($presentation.Indeterminate){[Windows.Forms.ProgressBarStyle]::Marquee}else{[Windows.Forms.ProgressBarStyle]::Continuous}
             if ($p -lt 0) { $p = 0 }
             if ($p -gt 100) { $p = 100 }
             $progress.Value = $p
@@ -633,6 +652,7 @@ $timer.Add_Tick({
         $script:WorkerProcess = $null
         $syncBtn.Enabled = -not $script:UpdateBusy -and -not $script:UpdateInstalling -and -not $script:StartupPending
         if ($code -eq 0) {
+            $progress.Style=[Windows.Forms.ProgressBarStyle]::Continuous
             $progress.Value = 100
             $statusLabel.Text = "동기화 완료"
             $completionSummary=$null

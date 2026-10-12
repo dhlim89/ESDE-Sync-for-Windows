@@ -65,6 +65,77 @@ function Write-Log([string]$Message) {
     }
 }
 
+function Initialize-Perf([string]$Scenario='Sync') {
+    $script:Perf=@{scenario=$Scenario;startedUtc=[DateTime]::UtcNow.ToString('o');clock=[Diagnostics.Stopwatch]::StartNew();counters=@{};phases=(New-Object Collections.ArrayList);stack=(New-Object Collections.ArrayList);overall=0;lastWriteMs=-500;maxSilenceMs=0;writes=0;writeMs=0;phase='initialization';label='준비 중';current=0;total=0;item=''}
+    foreach($name in @('TotalAdbCalls','AdbShellCalls','AdbPushCalls','AdbPullCalls','AdbStatCalls','AdbHashCalls','AdbMoveCalls','AdbDeleteCalls','TotalHashCount','SourceRomHashCount','AndroidRomHashCount','SourceMediaHashCount','SourceMediaStagingHashCount','AndroidMediaHashCount','SaveStateHashCount','MutationRevalidationHashCount','ProgressWriteFailures')){$script:Perf.counters[$name]=0}
+}
+function Add-PerfCounter([string]$Name,[long]$Value=1) {
+    if($null-ne$script:Perf){$script:Perf.counters[$Name]=[long]$script:Perf.counters[$Name]+$Value}
+}
+function Add-PerfMutationHash([long]$Value) {
+    if($null-eq$script:Perf){return}
+    if(@(Get-PSCallStack|Where-Object {$_.FunctionName-match'^(Invoke-Verified|Assert-PromotionEvidence|Sync-PromotionGamelist|Send-ClassifiedManagedFile|Assert-GamelistUnchanged|Set-MediaRemoteFile|Invoke-MediaTransaction|Invoke-DuplicateCleanupBatch)'}).Count){Add-PerfCounter 'MutationRevalidationHashCount' $Value}
+}
+function Start-PerfPhase([string]$Id,[string]$Label) {
+    if($null-eq$script:Perf){return $null}
+    $token=[pscustomobject]@{phase=$Id;phaseLabel=$Label;startUtc=[DateTime]::UtcNow.ToString('o');startMs=$script:Perf.clock.ElapsedMilliseconds;adb=[long]$script:Perf.counters.TotalAdbCalls;hash=[long]$script:Perf.counters.TotalHashCount;current=0;total=0;lastPercent=0}
+    [void]$script:Perf.stack.Add($token);$script:Perf.phase=$Id;$script:Perf.label=$Label;$script:Perf.current=0;$script:Perf.total=0;$script:Perf.item=''
+    Write-PerfProgress -Force
+    return $token
+}
+function Stop-PerfPhase($Token) {
+    if($null-eq$Token-or$null-eq$script:Perf){return}
+    [void]$script:Perf.phases.Add([pscustomobject]@{phase=$Token.phase;phaseLabel=$Token.phaseLabel;startUtc=$Token.startUtc;endUtc=[DateTime]::UtcNow.ToString('o');elapsedMs=$script:Perf.clock.ElapsedMilliseconds-$Token.startMs;items=$Token.current;total=$Token.total;adbCalls=[long]$script:Perf.counters.TotalAdbCalls-$Token.adb;hashCount=[long]$script:Perf.counters.TotalHashCount-$Token.hash})
+    $script:Perf.stack.Remove($Token)
+    if($script:Perf.stack.Count){$parent=$script:Perf.stack[$script:Perf.stack.Count-1];$script:Perf.phase=$parent.phase;$script:Perf.label=$parent.phaseLabel;$script:Perf.current=$parent.current;$script:Perf.total=$parent.total}
+    Write-PerfProgress -Force
+}
+function Set-PerfWork([int]$Current,[int]$Total,[string]$Item) {
+    if($null-eq$script:Perf){return}
+    $script:Perf.current=$Current;$script:Perf.total=$Total;$script:Perf.item=$Item
+    if($script:Perf.stack.Count){$token=$script:Perf.stack[$script:Perf.stack.Count-1];$token.current=$Current;$token.total=$Total}
+    Write-PerfProgress
+}
+function Get-PerfProgress {
+    if($null-eq$script:Perf){return @{}}
+    $phasePercent=$null
+    if($script:Perf.total-gt0){$phasePercent=[int][math]::Min(100,[math]::Floor(100*$script:Perf.current/$script:Perf.total));if($script:Perf.stack.Count){$token=$script:Perf.stack[$script:Perf.stack.Count-1];$phasePercent=[math]::Max($token.lastPercent,$phasePercent);$token.lastPercent=$phasePercent}}
+    if($null-ne$phasePercent-and$script:Perf.phase-ceq'Prepare-MediaPlan'){$script:Perf.overall=[math]::Max($script:Perf.overall,50+[int]($phasePercent*0.20))}
+    return @{phase=$script:Perf.phase;phaseLabel=$script:Perf.label;overallPercent=$script:Perf.overall;phasePercent=$phasePercent;phaseCurrent=$script:Perf.current;phaseTotal=$script:Perf.total;currentItem=$script:Perf.item;elapsedMs=$script:Perf.clock.ElapsedMilliseconds;indeterminate=($null-eq$phasePercent)}
+}
+function Write-PerfProgress([switch]$Force) {
+    if($null-eq$script:Perf-or-not$StatusFile){return}
+    $now=$script:Perf.clock.ElapsedMilliseconds
+    if(-not$Force-and$now-$script:Perf.lastWriteMs-lt500){return}
+    $record=@{state='running';message=$script:Perf.label;percent=$script:Perf.overall;current=0;total=0}
+    if($script:Perf.lastStatus){foreach($k in $script:Perf.lastStatus.Keys){$record[$k]=$script:Perf.lastStatus[$k]}}
+    $extra=Get-PerfProgress;foreach($k in $extra.Keys){$record[$k]=$extra[$k]}
+    if($Operation-cne'Sync'){$record.requestId=$DuplicateRequestId}
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    try{$record|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $StatusFile -Encoding UTF8}
+    catch{Add-PerfCounter 'ProgressWriteFailures';return}
+    $script:Perf.writeMs+=$timer.Elapsed.TotalMilliseconds;$script:Perf.writes++
+    if($script:Perf.lastWriteMs-ge0){$script:Perf.maxSilenceMs=[math]::Max($script:Perf.maxSilenceMs,$now-$script:Perf.lastWriteMs)}
+    $script:Perf.lastWriteMs=$now
+}
+function Get-PerfFileHash {
+    param([Parameter(Position=0)][string]$Path,[string]$LiteralPath,[string]$Algorithm='SHA256')
+    Add-PerfCounter 'TotalHashCount';Add-PerfCounter 'LocalFileHashCount'
+    Add-PerfMutationHash 1
+    $name=if($LiteralPath){$LiteralPath}else{$Path}
+    $callers=if($null-ne$script:Perf){@(Get-PSCallStack|Select-Object -ExpandProperty FunctionName)}else{@()}
+    $category=if($callers-ccontains'Read-ClassificationRom'){'AndroidRomHashCount'}elseif($callers-ccontains'Get-MediaRemoteHash'){'AndroidMediaHashCount'}elseif($callers-ccontains'Get-MediaSourceFiles'-and$name.EndsWith('.source')){'SourceMediaStagingHashCount'}elseif($name-match'[/\\]roms[/\\]'){'SourceRomHashCount'}elseif($name-match'[/\\]downloaded_media[/\\]'){'SourceMediaHashCount'}elseif($name-match'\.(srm|rtc|state)$'){'SaveStateHashCount'}else{'OtherFileHashCount'}
+    Add-PerfCounter $category
+    if($LiteralPath){Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm}else{Get-FileHash -Path $Path -Algorithm $Algorithm}
+}
+function Write-PerfSummary {
+    if($null-eq$script:Perf){return}
+    $record=[ordered]@{schemaVersion=1;timestamp=$script:Perf.startedUtc;scenario=$script:Perf.scenario;version=$AppVersion.version;gitCheckpoint=$script:Perf.gitCheckpoint;implementationSha256=$script:Perf.implementationSha256;deviceId=$Serial;elapsedMs=$script:Perf.clock.ElapsedMilliseconds;counters=$script:Perf.counters;phases=@($script:Perf.phases.ToArray());progressWriteCount=$script:Perf.writes;progressWriteElapsedMs=$script:Perf.writeMs;maxProgressSilenceMs=[math]::Max($script:Perf.maxSilenceMs,$script:Perf.clock.ElapsedMilliseconds-$script:Perf.lastWriteMs)}
+    $record|ConvertTo-Json -Depth 20|Set-Content -LiteralPath (Join-Path $StateDir 'performance-baseline.json') -Encoding UTF8
+    Write-Log ('PERF total_elapsed_ms='+$record.elapsedMs+' adb_calls='+$record.counters.TotalAdbCalls+' hash_count='+$record.counters.TotalHashCount)
+    foreach($phase in $record.phases){Write-Log ('PERF phase='+$phase.phase+' elapsed_ms='+$phase.elapsedMs+' items='+$phase.items+' adb_calls='+$phase.adbCalls+' hash_count='+$phase.hashCount)}
+}
+
 function Write-Status([string]$State,[string]$Message,[int]$Current,[int]$Total,$Summary=$null) {
     $percent = 0
     if ($Total -gt 0) { $percent = [math]::Floor(($Current / $Total) * 100) }
@@ -72,6 +143,13 @@ function Write-Status([string]$State,[string]$Message,[int]$Current,[int]$Total,
     if($Operation-ceq'Sync'-and$null-ne$script:DuplicateInformationalCount){$record.DuplicateUnregisteredCount=$script:DuplicateInformationalCount}
     if($Operation-cne'Sync'){$record.requestId=$DuplicateRequestId}
     if($null-ne$Summary){$record.summary=$Summary}
+    if($null-ne$script:Perf){
+        if($State-ceq'done'){$script:Perf.overall=100;$script:Perf.phase='final_summary';$script:Perf.label=$Message;$script:Perf.current=$Current;$script:Perf.total=$Total;$script:Perf.item=''}
+        elseif($State-ceq'running'){$script:Perf.overall=[math]::Max($script:Perf.overall,[math]::Min(95,70+[int]($percent*0.25)))}
+        $script:Perf.lastStatus=$record
+        Write-PerfProgress -Force
+        return
+    }
     $record|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $StatusFile -Encoding UTF8
 }
 
@@ -83,6 +161,12 @@ function Join-CommandLineArgument([string]$arg) {
 
 function Invoke-Adb {
     param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
+
+    Add-PerfCounter 'TotalAdbCalls'
+    foreach($kind in @('shell','push','pull')){if($Args-ccontains$kind){Add-PerfCounter ('Adb'+(Get-Culture).TextInfo.ToTitleCase($kind)+'Calls')}}
+    $command=$Args -join ' '
+    foreach($entry in @(@('AdbStatCalls','\bstat\b'),@('AdbHashCalls','sha256sum'),@('AdbMoveCalls','\bmv\b'),@('AdbDeleteCalls','\brm\b'))){if($command-match$entry[1]){Add-PerfCounter $entry[0]}}
+    Write-PerfProgress
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $AdbPath
@@ -99,10 +183,21 @@ function Invoke-Adb {
 
     if (-not $p.Start()) { throw "adb.exe 실행에 실패했습니다." }
 
-    $stdout = $p.StandardOutput.ReadToEnd()
-    $stderr = $p.StandardError.ReadToEnd()
-    $p.WaitForExit()
+    # Drain both pipes while emitting throttled read-only heartbeat updates.
+    $stdoutTask=$p.StandardOutput.ReadToEndAsync()
+    $stderrTask=$p.StandardError.ReadToEndAsync()
+    while(-not$p.WaitForExit(500)){Write-PerfProgress}
+    $stdout=$stdoutTask.GetAwaiter().GetResult()
+    $stderr=$stderrTask.GetAwaiter().GetResult()
 
+    if($command-match'sha256sum'){
+        $hashes=[regex]::Matches($stdout,'(?im)(?<![a-f0-9])[a-f0-9]{64}(?![a-f0-9])').Count
+        Add-PerfCounter 'TotalHashCount' $hashes
+        Add-PerfMutationHash $hashes
+        $category=if($command.Contains('/ROMs')){'AndroidRomHashCount'}elseif($command.Contains('/downloaded_media')){'AndroidMediaHashCount'}elseif($command-match'/RetroArch/(saves|states)'){'SaveStateHashCount'}else{'OtherAndroidHashCount'}
+        Add-PerfCounter $category $hashes
+    }
+    Write-PerfProgress
     $lines = @()
     if ($stdout) { $lines += @($stdout -split "`r?`n" | Where-Object { $_ -ne "" }) }
     if ($stderr) { $lines += @($stderr -split "`r?`n" | Where-Object { $_ -ne "" }) }
@@ -335,6 +430,8 @@ function Get-HomePackage {
 }
 
 function Preflight-CheckForeground {
+    $perfToken=Start-PerfPhase 'Preflight-CheckForeground' '화면 안전 검사'
+    try {
     Write-Status 'preflight' '화면·잠금·실행 중인 앱을 확인하는 중...' 0 1
     $previous=''
     # 순차 dumpsys 수집 사이의 전환을 보수적으로 처리하기 위해 안전 합의를 재확인한다.
@@ -346,6 +443,7 @@ function Preflight-CheckForeground {
         $previous=$decision.package
     }
     Write-Log ('PREFLIGHT OK: stable activity/window/input consensus on '+$previous)
+    } finally { Stop-PerfPhase $perfToken }
 }
 function Stop-Esde {
     Write-Status "stopping" "ES-DE를 종료하는 중..." 0 1
@@ -358,6 +456,8 @@ function Stop-Esde {
 }
 
 function Start-Esde {
+    $perfToken=Start-PerfPhase 'Start-Esde' 'ES-DE 재실행'
+    try {
     Write-Status "restarting" "ES-DE를 다시 실행하는 중..." 1 1
     Write-Log "START APP [ES-DE] org.es_de.frontend/.MainActivityHomeApp"
 
@@ -365,6 +465,7 @@ function Start-Esde {
     if ($r.Code -ne 0) {
         throw "ES-DE 재실행에 실패했습니다.`r`n$($r.StdErr)"
     }
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 $LocalOnlyFolders = @('_TEST', '_UNREGISTERED')
@@ -1000,6 +1101,8 @@ function Get-RomClassificationCapability([string]$System) {
 }
 
 function Prepare-RomSystemSync($RomJob,$XmlJob,[string]$Session) {
+    $perfToken=Start-PerfPhase 'Prepare-RomSystemSync' 'ROM 분류와 XML 준비'
+    try {
     $capability=Get-RomClassificationCapability $RomJob.System
     if($RomJob.System-cne$XmlJob.System -or $RomJob.System-cnotin$selectedSystems -or $capability.Status-ceq'Unknown'){throw 'CLASSIFICATION BLOCK: invalid system scope'}
     if($capability.Status-ceq'Unsupported'){
@@ -1010,9 +1113,12 @@ function Prepare-RomSystemSync($RomJob,$XmlJob,[string]$Session) {
     $snapshot=Prepare-GamelistSystem $XmlJob $Session -PreserveNonMasterNodes -SnapshotOnly
     $plan=Prepare-ClassificationSystem $RomJob $XmlJob $snapshot $Session
     return [pscustomobject]@{Capability=$capability;ClassificationPlan=$plan;XmlPlan=$plan.XmlPlan}
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 function Sync-RomSystem($Job,$ClassificationPlan,[string]$Label) {
+    $perfToken=Start-PerfPhase 'Sync-RomSystem' 'ROM 처리'
+    try {
     $capability=Get-RomClassificationCapability $Job.System
     if($capability.Status-ceq'Unknown' -or $Job.System-cnotin$selectedSystems){throw 'CLASSIFICATION BLOCK: invalid system scope'}
     if($capability.Status-ceq'Unsupported'){
@@ -1022,6 +1128,7 @@ function Sync-RomSystem($Job,$ClassificationPlan,[string]$Label) {
     }
     if($null-eq$ClassificationPlan){throw 'CLASSIFICATION BLOCK: supported system plan missing'}
     Sync-ClassifiedManagedRom $Job $ClassificationPlan $Label
+    } finally { Stop-PerfPhase $perfToken }
 }
 function Get-ClassificationExtensions([string]$System) {
     # Stage 1의 실제 ES-DE GB/GBC 정의에서 확인된 extension만.
@@ -1367,6 +1474,8 @@ function Assert-RenameFileCase([string]$Path) {
     if($matches.Count-gt1-or($matches.Count-eq1-and$matches[0]-cne$Path)){throw 'RENAME BLOCK: case collision'}
 }
 function Get-RenameRemoteInventory([string]$Root,[switch]$ExcludeTest) {
+    $perfToken=Start-PerfPhase ('remote_inventory:'+ $Root) 'Android 파일 SHA 목록 확인'
+    try {
     if($Root-cnotin@('/storage/emulated/0/RetroArch/saves','/storage/emulated/0/RetroArch/states','/storage/emulated/0/ROMs','/storage/emulated/0/ES-DE/downloaded_media/gb','/storage/emulated/0/ES-DE/downloaded_media/gbc')){throw 'RENAME BLOCK: inventory root'}
     $q=Quote-Sh $Root
     $kind=Invoke-PromotionShell ('if [ -L '+$q+' ]; then printf LINK; elif [ -d '+$q+' ]; then printf DIR; elif [ -e '+$q+' ]; then printf OTHER; else printf ABSENT; fi')
@@ -1387,7 +1496,9 @@ function Get-RenameRemoteInventory([string]$Root,[switch]$ExcludeTest) {
         if($info.Class-ceq'Invalid'-or$info.Key.Substring(2)-cne$relative-or-not$seen.Add($relative)){throw 'RENAME BLOCK: inventory path/duplicate/case'}
         $rows+=[pscustomobject]@{RelativePath=$relative;Size=$size;Sha256=$hash;Kind='File';IsLink=$false}
     }
+    Set-PerfWork $rows.Count $rows.Count $Root
     return @($rows|Sort-Object RelativePath)
+    } finally { Stop-PerfPhase $perfToken }
 }
 function Get-RenameAssetInventory {
     [void](Assert-RenameAssetParent '/storage/emulated/0/RetroArch/saves')
@@ -1424,7 +1535,7 @@ function Get-RenameContentEvidence([switch]$DuplicateManager) {
             Assert-LocalSourcePath $file.FullName $SourceRoot ([long]$file.Attributes)
             if($file.PSIsContainer){continue}
             $relative=$system.Name+'/'+$file.FullName.Substring($system.FullName.Length+1).Replace('\','/')
-            $content=Get-RenameContentPathEvidence $relative (Get-FileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            $content=Get-RenameContentPathEvidence $relative (Get-PerfFileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant()
             if($content){$managed+=$content}
         }
     }
@@ -1632,7 +1743,7 @@ function Get-PromotionXmlEvidence($Local,$Master,[string]$SourceKey,[string]$Can
 function Assert-PromotionEvidence($Plan,[string]$Session,[object[]]$CompletedAssets=@()) {
     Assert-ClassificationSourceSnapshot $Plan
     Assert-PromotionGamelistSnapshot $Plan.XmlPlan
-    if($Plan.XmlPlan.Output -and (Get-FileHash $Plan.XmlPlan.Output).Hash-cne$Plan.PreparedXmlSha){throw 'PROMOTION BLOCK: staged XML changed'}
+    if($Plan.XmlPlan.Output -and (Get-PerfFileHash $Plan.XmlPlan.Output).Hash-cne$Plan.PreparedXmlSha){throw 'PROMOTION BLOCK: staged XML changed'}
     if($Plan.MasterPath -and (Test-Path -LiteralPath $Plan.MasterPath)){Assert-LocalSourcePath $Plan.MasterPath $SourceRoot}
     $master=if($Plan.MasterPath -and (Test-Path -LiteralPath $Plan.MasterPath)){Read-EsdeGamelist $Plan.MasterPath}else{$null}
     $local=if($Plan.XmlPlan.Present){Read-EsdeGamelist $Plan.XmlPlan.Pulled}else{$null}
@@ -1766,7 +1877,7 @@ function Invoke-ClassificationPromotions([object[]]$Plans,$Context,[string]$Sess
                 if($plan.XmlPlan.Output){
                     $back=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-promotion-final.xml')
                     $r=Invoke-Adb -s $Serial pull $plan.XmlPlan.RemoteFile $back
-                    if(-not(Test-PromotionAdbResult $r @('-s',$Serial,'pull',$plan.XmlPlan.RemoteFile,$back)) -or (Get-FileHash $back).Hash-cne$plan.PreparedXmlSha){throw 'PROMOTION RECOVERY NEEDED: final XML SHA'}
+                    if(-not(Test-PromotionAdbResult $r @('-s',$Serial,'pull',$plan.XmlPlan.RemoteFile,$back)) -or (Get-PerfFileHash $back).Hash-cne$plan.PreparedXmlSha){throw 'PROMOTION RECOVERY NEEDED: final XML SHA'}
                     [void](Read-EsdeGamelist $back)
                 }
                 $currentMaster=if(Test-Path -LiteralPath $plan.MasterPath){Read-EsdeGamelist $plan.MasterPath}else{$null}
@@ -1870,10 +1981,16 @@ function New-ManagedCanonicalizationPlan($Classification,$Mapping,[object[]]$Bin
 }
 
 function Get-ClassificationSourceRows($Job) {
-    foreach($item in @(Get-ManagedLocalItems $Job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer})){
+    $perfToken=Start-PerfPhase 'Get-ClassificationSourceRows' '원본 ROM SHA 확인'
+    try {
+    $perfItems=@(Get-ManagedLocalItems $Job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer});$perfIndex=0
+    Add-PerfCounter 'SourceRomCount' $perfItems.Count
+    foreach($item in $perfItems){
+        Set-PerfWork (++$perfIndex) $perfItems.Count $item.Name
         $relative=$item.FullName.Substring($Job.LocalPath.Length).TrimStart('\','/').Replace('\','/')
-        [pscustomobject]@{RelativePath=$relative;Sha256=(Get-FileHash -LiteralPath $item.FullName).Hash.ToLowerInvariant();FullName=$item.FullName}
+        [pscustomobject]@{RelativePath=$relative;Sha256=(Get-PerfFileHash -LiteralPath $item.FullName).Hash.ToLowerInvariant();FullName=$item.FullName}
     }
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 function Assert-ClassificationRemoteLinks([string]$Root) {
@@ -1893,6 +2010,8 @@ function Test-LocalOnlySystemPresence([string]$Root) {
 }
 
 function Get-ClassificationAndroidRows($Job,[string]$Session,[switch]$IncludeLocalOnly) {
+    $perfToken=Start-PerfPhase 'Get-ClassificationAndroidRows' 'Android ROM SHA 확인'
+    try {
     Assert-ClassificationRemoteLinks $Job.RemotePath
     $paths=@()
     if($IncludeLocalOnly){
@@ -1912,7 +2031,10 @@ function Get-ClassificationAndroidRows($Job,[string]$Session,[switch]$IncludeLoc
         # 기존 일반 ROM 순서를 유지한다. 보호 항목은 mutation 계획에 사용하지 않는다.
         $paths=@($paths|Where-Object {-not(Is-LocalOnlyRelativePath $_)})+@($paths|Where-Object {Is-LocalOnlyRelativePath $_})
     }else{$paths=@(Get-RemoteFiles $Job.RemotePath)}
+    Add-PerfCounter 'AndroidRomCount' $paths.Count
+    $perfIndex=0
     foreach($relative in $paths){
+        Set-PerfWork (++$perfIndex) $paths.Count ($Job.System+'/'+$relative)
         if(Is-LocalOnlyRelativePath $relative){
             # SHA는 읽기 전용 presence evidence이다. 보호 ROM을 전송/이동/삭제하지 않는다.
             if((Get-EsdeGamePathInfo $relative).Class-ceq'Invalid' -or [IO.Path]::GetExtension($relative).ToLowerInvariant()-cnotin(Get-ClassificationExtensions $Job.System)){continue}
@@ -1928,6 +2050,7 @@ function Get-ClassificationAndroidRows($Job,[string]$Session,[switch]$IncludeLoc
         if(-not$read){throw 'CLASSIFICATION BLOCK: inventory changed'}
         [pscustomobject]@{RelativePath=$relative;Sha256=$read.Sha256}
     }
+    } finally { Stop-PerfPhase $perfToken }
 }
 function New-ClassificationContext([string]$StateRoot,[string]$Source,[string]$Device) {
     $root=[IO.Path]::GetFullPath($Source).TrimEnd('\')
@@ -2037,7 +2160,7 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
     $output=$null
     if($bound){$output=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-classified.xml');[void](Write-EsdeGamelist $bound $output)}
     $xml=$XmlPlan.PSObject.Copy();$xml.Output=$output
-    return [pscustomobject]@{System=$RomJob.System;RomJob=$RomJob;Source=$source;Moves=$moves;Promotions=$promotions;CompletedPromotions=0;MasterPath=(Join-Path $XmlJob.LocalPath 'gamelist.xml');PreparedXmlSha=$(if($output){(Get-FileHash $output).Hash}else{'ABSENT'});Inventory=$classification;XmlPlan=$xml;Session=$Session;ReviewRequired=$review;ReviewIsolation=$isolation;ProtectMedia=($review -or $promotions.Count-gt0 -or $moves.Count-gt0 -or (Test-LocalOnlySystemPresence $RomJob.RemotePath) -or @(Get-LocalOnlyGameEntries $local).Count-gt0);Validated=$true}
+    return [pscustomobject]@{System=$RomJob.System;RomJob=$RomJob;Source=$source;Moves=$moves;Promotions=$promotions;CompletedPromotions=0;MasterPath=(Join-Path $XmlJob.LocalPath 'gamelist.xml');PreparedXmlSha=$(if($output){(Get-PerfFileHash $output).Hash}else{'ABSENT'});Inventory=$classification;XmlPlan=$xml;Session=$Session;ReviewRequired=$review;ReviewIsolation=$isolation;ProtectMedia=($review -or $promotions.Count-gt0 -or $moves.Count-gt0 -or (Test-LocalOnlySystemPresence $RomJob.RemotePath) -or @(Get-LocalOnlyGameEntries $local).Count-gt0);Validated=$true}
 }
 
 function Assert-ClassificationSourceSnapshot($Plan) {
@@ -2092,7 +2215,7 @@ function Invoke-ClassificationMoves([object[]]$Plans,$Context,[string]$Session) 
             if($plan.XmlPlan.Output){
                 $back=Join-Path $Session ([guid]::NewGuid().ToString('N')+'-final.xml')
                 $r=Invoke-Adb -s $Serial pull $plan.XmlPlan.RemoteFile $back
-                if($r.Code-ne0 -or (Get-FileHash -LiteralPath $back).Hash-cne(Get-FileHash -LiteralPath $plan.XmlPlan.Output).Hash){throw 'CLASSIFICATION RECOVERY NEEDED: XML final SHA'}
+                if($r.Code-ne0 -or (Get-PerfFileHash -LiteralPath $back).Hash-cne(Get-PerfFileHash -LiteralPath $plan.XmlPlan.Output).Hash){throw 'CLASSIFICATION RECOVERY NEEDED: XML final SHA'}
                 [void](Read-EsdeGamelist $back)
             }
             $plan.XmlPlan.ClassificationCommitted=$true
@@ -2166,7 +2289,7 @@ function Sync-ClassifiedManagedRom($Job,$Plan,[string]$Label) {
 
 function Send-ClassifiedManagedFile($Row,[string]$Remote,[string]$Session,[scriptblock]$Adb) {
     $unchanged=[pscustomobject]@{Code=0;StdOut='';StdErr='';Output=@()}
-    if((Get-FileHash -LiteralPath $Row.FullName).Hash.ToLowerInvariant()-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: managed source changed before push'}
+    if((Get-PerfFileHash -LiteralPath $Row.FullName).Hash.ToLowerInvariant()-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: managed source changed before push'}
     $current=Read-ClassificationRom $Remote $Session
     if($current){
         if($current.Sha256-cne$Row.Sha256){throw 'CLASSIFICATION BLOCK: concurrent MANAGED_CONFLICT before push'}
@@ -2205,7 +2328,7 @@ function Read-ClassificationRom([string]$Path,[string]$Session) {
     $file=Join-Path $Session ([guid]::NewGuid().ToString('N')+'.rom')
     $r=Invoke-Adb -s $Serial pull $Path $file
     if($r.Code-ne0 -or -not[IO.File]::Exists($file)){throw 'classification ROM pull 실패'}
-    $pulledHash=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+    $pulledHash=(Get-PerfFileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
     if($nativeHash -and $nativeHash-cne$pulledHash){throw 'classification Android/pull SHA 불일치'}
     return [pscustomobject]@{Path=$Path;File=$file;Sha256=$pulledHash;HashMethod=$method}
 }
@@ -2277,6 +2400,8 @@ else printf ABSENT; fi
 }
 
 function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmanagedPaths=@(),[switch]$PreserveNonMasterNodes,[switch]$SnapshotOnly,[switch]$LegacyManagedSync) {
+    $perfToken=Start-PerfPhase 'Prepare-GamelistSystem' 'gamelist 읽기와 병합'
+    try {
     $remote=$Job.RemotePath+'/gamelist.xml'
     Assert-RemotePath $remote
     $folder=Join-Path $Session ([guid]::NewGuid().ToString('N'))
@@ -2312,6 +2437,7 @@ function Prepare-GamelistSystem($Job,[string]$Session,[string[]]$PreservedUnmana
         Write-Log ('GAMELIST '+$Job.System+': MERGE: created VALIDATION: pass')
     }
     return [pscustomobject]@{System=$Job.System;RemotePath=$Job.RemotePath;RemoteFile=$remote;Present=$present;Output=$output;Pulled=$pulled;Validated=$true;LocalOnlyCount=$entries.Count;SourcePresent=[bool]$Job.GamelistSource;Local=$local;PreservedUnmanagedPaths=$PreservedUnmanagedPaths;ClassificationCommitted=$false}
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 function Assert-GamelistSnapshot($Plan) {
@@ -2321,11 +2447,13 @@ function Assert-GamelistSnapshot($Plan) {
         $current=Join-Path (Split-Path -Parent $Plan.Pulled) 'current-before-commit.xml'
         $r=Invoke-Adb -s $Serial pull $Plan.RemoteFile $current
         if($r.Code-ne0 -or -not(Test-Path -LiteralPath $current -PathType Leaf)){throw 'Android gamelist 교체 전 재확인 실패'}
-        if((Get-FileHash -LiteralPath $current -Algorithm SHA256).Hash-cne(Get-FileHash -LiteralPath $Plan.Pulled -Algorithm SHA256).Hash){throw 'Android gamelist 내용이 준비 이후 변경되었습니다.'}
+        if((Get-PerfFileHash -LiteralPath $current -Algorithm SHA256).Hash-cne(Get-PerfFileHash -LiteralPath $Plan.Pulled -Algorithm SHA256).Hash){throw 'Android gamelist 내용이 준비 이후 변경되었습니다.'}
     }
 }
 
 function Sync-GamelistSystem($Plan) {
+    $perfToken=Start-PerfPhase 'Sync-GamelistSystem' 'gamelist 전송 검증'
+    try {
     # Plan이 호출자에 의해 바뀌어도 선택된 gamelist.xml 외 파일은 취급하지 않는다.
     Assert-RemotePath $Plan.RemoteFile
     if(-not$Plan.Validated){throw '검증되지 않은 gamelist plan'}
@@ -2358,7 +2486,7 @@ function Sync-GamelistSystem($Plan) {
         $r=Invoke-Adb -s $Serial pull $temporary $readBack
         if($r.Code-ne0 -or -not(Test-Path -LiteralPath $readBack -PathType Leaf)){throw 'Android staging 재확인 pull 실패'}
         [void]@(Get-EsdeGameEntries (Read-EsdeGamelist $readBack))
-        if((Get-FileHash -LiteralPath $readBack -Algorithm SHA256).Hash-cne(Get-FileHash -LiteralPath $Plan.Output -Algorithm SHA256).Hash){throw 'Android staging 전송 해시 불일치'}
+        if((Get-PerfFileHash -LiteralPath $readBack -Algorithm SHA256).Hash-cne(Get-PerfFileHash -LiteralPath $Plan.Output -Algorithm SHA256).Hash){throw 'Android staging 전송 해시 불일치'}
         Write-Log ('GAMELIST '+$Plan.System+': REMOTE VALIDATION: pass')
         # 같은 디렉터리의 rename. 최종 파일을 먼저 삭제하거나 직접 push하지 않는다.
         Assert-GamelistSnapshot $Plan
@@ -2369,6 +2497,7 @@ function Sync-GamelistSystem($Plan) {
     }finally{
         if($attempted){try{Remove-RemoteFile $temporary;Write-Log 'GAMELIST TEMP CLEANUP: pass'}catch{Write-Log ('GAMELIST TEMP CLEANUP FAILED: '+$_.Exception.Message)}}
     }
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 function Get-MediaRelativePath([string]$Path) {
@@ -2388,6 +2517,7 @@ function Get-MediaRemotePath([string]$System,[string]$Relative) {
 }
 
 function Get-MediaTextHash([string]$Text) {
+    Add-PerfCounter 'TotalHashCount';Add-PerfCounter 'TextHashCount'
     $sha=[Security.Cryptography.SHA256]::Create()
     try{return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
@@ -2461,20 +2591,30 @@ function New-MediaContext([string]$StateRoot,[string]$Source,[string]$Device) {
 }
 
 function Get-MediaSourceFiles($Jobs,$Context) {
+    $perfToken=Start-PerfPhase 'Get-MediaSourceFiles' '원본 미디어 SHA 확인'
+    try {
     $files=@()
     foreach($job in $Jobs){
+        $mediaJobPerf=Start-PerfPhase ('source_media:'+ $job.System) ('원본 미디어 확인: '+$job.System)
+        try {
         if(-not(Test-Path -LiteralPath $job.LocalPath)){continue}
-        foreach($item in @(Get-ManagedLocalItems $job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer})){
+        $perfItems=@(Get-ManagedLocalItems $job.LocalPath $SourceRoot|Where-Object {-not$_.PSIsContainer});$perfIndex=0
+        Add-PerfCounter 'SourceMediaCount' $perfItems.Count
+        foreach($item in $perfItems){
+            Set-PerfWork (++$perfIndex) $perfItems.Count ($job.System+'/'+$item.Name)
             $relative=Get-MediaRelativePath ($item.FullName.Substring($job.LocalPath.Length).TrimStart('\','/'))
             [void](Get-MediaRemotePath $job.System $relative)
             $copy=Join-Path $Context.Session ([guid]::NewGuid().ToString('N')+'.source')
-            $hash=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hash=(Get-PerfFileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             Copy-Item -LiteralPath $item.FullName -Destination $copy
-            if((Get-FileHash -LiteralPath $copy).Hash-ine$hash){throw 'media 원본이 준비 중 변경됨'}
+            if((Get-PerfFileHash -LiteralPath $copy).Hash-ine$hash){throw 'media 원본이 준비 중 변경됨'}
             $files+=[pscustomobject]@{system=$job.System;relativePath=$relative;hash=$hash;size=(Get-Item -LiteralPath $copy).Length;path=$copy}
         }
+        } finally { Stop-PerfPhase $mediaJobPerf }
     }
+    Set-PerfWork $files.Count $files.Count ''
     return $files
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 function Get-MediaRemoteHash([string]$Path,[string]$Session) {
@@ -2498,10 +2638,12 @@ function Get-MediaRemoteHash([string]$Path,[string]$Session) {
     $copy=Join-Path $Session ([guid]::NewGuid().ToString('N')+'.hash')
     $r=Invoke-Adb -s $Serial pull $Path $copy
     if($r.Code-ne0 -or -not(Test-Path -LiteralPath $copy -PathType Leaf)){throw 'media hash unknown: pull 실패'}
-    return (Get-FileHash -LiteralPath $copy).Hash.ToLowerInvariant()
+    return (Get-PerfFileHash -LiteralPath $copy).Hash.ToLowerInvariant()
 }
 
 function Prepare-MediaPlan($Jobs,$Sources,$Context) {
+    $perfToken=Start-PerfPhase 'Prepare-MediaPlan' '미디어 비교'
+    try {
     $operations=@();$conflicts=@();$summary=0
     $entries=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
     foreach($entry in $Context.Manifest.entries){$entries.Add($entry.system+'/'+$entry.relativePath,$entry)}
@@ -2511,9 +2653,13 @@ function Prepare-MediaPlan($Jobs,$Sources,$Context) {
         Assert-RemotePath $job.RemotePath
         if($job.RemotePath-cne('/storage/emulated/0/ES-DE/downloaded_media/'+$job.System)){throw 'media job 범위 오류'}
         $remote=@(Get-RemoteFiles $job.RemotePath);[void]@(Get-RemoteDirs $job.RemotePath)
+        Add-PerfCounter 'AndroidMediaCount' $remote.Count
         foreach($relative in $remote){if(-not$sourceMap.ContainsKey($job.System+'/'+$relative) -and -not$entries.ContainsKey($job.System+'/'+$relative)){$summary++}}
         $paths=@(@($Sources|Where-Object system -ceq $job.System|ForEach-Object relativePath)+@($Context.Manifest.entries|Where-Object system -ceq $job.System|ForEach-Object relativePath)|Sort-Object -Unique -CaseSensitive)
+        $perfIndex=0
+        Add-PerfCounter 'MediaCompareCount' $paths.Count
         foreach($relative in $paths){
+            Set-PerfWork (++$perfIndex) $paths.Count ($job.System+'/'+$relative)
             $key=$job.System+'/'+$relative;$path=Get-MediaRemotePath $job.System $relative
             $current=Get-MediaRemoteHash $path $Context.Session
             $source=if($sourceMap.ContainsKey($key)){$sourceMap[$key]}else{$null}
@@ -2533,6 +2679,7 @@ function Prepare-MediaPlan($Jobs,$Sources,$Context) {
     foreach($conflict in $conflicts){Write-Log ('MEDIA CONFLICT: '+$conflict)}
     if($conflicts.Count){throw 'media conflict: 원격 변경 전에 전체 작업 차단'}
     return ,$operations
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 function Set-MediaRemoteFile([string]$Remote,[string]$Local,[string]$ExpectedHash,[string]$Session,[string]$OldHash,$Operation=$null,$Context=$null,$Journal=$null) {
@@ -2566,7 +2713,7 @@ function Set-MediaRemoteFile([string]$Remote,[string]$Local,[string]$ExpectedHas
 function Save-MediaManifest($Context,$Manifest) {
     if($Context.OriginalBytes){
         $before=Join-Path $Context.Session 'original-manifest.json'
-        if(-not(Test-Path -LiteralPath $Context.ManifestPath) -or (Get-FileHash -LiteralPath $Context.ManifestPath).Hash-cne(Get-FileHash -LiteralPath $before).Hash){throw 'media manifest concurrent modification'}
+        if(-not(Test-Path -LiteralPath $Context.ManifestPath) -or (Get-PerfFileHash -LiteralPath $Context.ManifestPath).Hash-cne(Get-PerfFileHash -LiteralPath $before).Hash){throw 'media manifest concurrent modification'}
     }elseif(Test-Path -LiteralPath $Context.ManifestPath){throw 'media manifest가 실행 중 새로 생성됨'}
     Assert-MediaManifest $Manifest $Context
     # 생성한 JSON도 다시 파싱/계약 검증한다.
@@ -2577,10 +2724,10 @@ function Save-MediaManifest($Context,$Manifest) {
 
 function Restore-MediaManifest($Context,$AttemptedManifest) {
     if(Test-Path -LiteralPath $Context.ManifestPath){
-        $disk=(Get-FileHash -LiteralPath $Context.ManifestPath).Hash.ToLowerInvariant()
+        $disk=(Get-PerfFileHash -LiteralPath $Context.ManifestPath).Hash.ToLowerInvariant()
         if($Context.OriginalBytes){
             $before=Join-Path $Context.Session 'original-manifest.json'
-            if($disk-ceq(Get-FileHash -LiteralPath $before).Hash.ToLowerInvariant()){return}
+            if($disk-ceq(Get-PerfFileHash -LiteralPath $before).Hash.ToLowerInvariant()){return}
         }
         $attempt=Get-MediaTextHash ($AttemptedManifest|ConvertTo-Json -Depth 12)
         if($disk-cne$attempt){throw 'manifest rollback 중 외부 변경 감지'}
@@ -2596,6 +2743,8 @@ function Restore-MediaManifest($Context,$AttemptedManifest) {
 }
 
 function Invoke-MediaTransaction($Plan,$Context) {
+    $perfToken=Start-PerfPhase 'Invoke-MediaTransaction' '미디어 처리'
+    try {
     $manifest=$Context.Manifest|ConvertTo-Json -Depth 12|ConvertFrom-Json
     $journal=[pscustomobject]@{state='applying';operations=$Plan}
     $journalPath=Join-Path $Context.Session 'journal.json'
@@ -2609,7 +2758,7 @@ function Invoke-MediaTransaction($Plan,$Context) {
                 if($operation.oldHash){
                     $operation.backup=Join-Path $Context.Session ([guid]::NewGuid().ToString('N')+'.backup')
                     $r=Invoke-Adb -s $Serial pull $operation.remote $operation.backup
-                    if($r.Code-ne0 -or -not(Test-Path -LiteralPath $operation.backup) -or (Get-FileHash -LiteralPath $operation.backup).Hash-ine$operation.oldHash){throw 'media backup 검증 실패'}
+                    if($r.Code-ne0 -or -not(Test-Path -LiteralPath $operation.backup) -or (Get-PerfFileHash -LiteralPath $operation.backup).Hash-ine$operation.oldHash){throw 'media backup 검증 실패'}
                 }
             }
         }
@@ -2662,6 +2811,7 @@ function Invoke-MediaTransaction($Plan,$Context) {
         $journal.state='rolled_back';Write-MediaJson $journalPath $journal $Context.StateRoot
         throw $original
     }
+    } finally { Stop-PerfPhase $perfToken }
 }
 
 function Close-MediaSession($Context) {
@@ -2938,6 +3088,8 @@ function Get-DuplicateManualNamespaceEvidence {
     [pscustomobject]@{Names=@($names|Sort-Object System,RelativePath);Uncertain=$uncertain}
 }
 function Get-DuplicateProductionSnapshot([string]$Session) {
+    $perfToken=Start-PerfPhase 'Get-DuplicateProductionSnapshot' '중복 검사 자료 수집'
+    try {
     $content=Get-RenameContentEvidence -DuplicateManager
     $files=@(Get-RenameRemoteInventory '/storage/emulated/0/ROMs' -ExcludeTest)
     $android=@();foreach($r in $content.Android){$f=@($files|Where-Object RelativePath -CEQ ($r.System+'/'+$r.RelativePath));if($f.Count-ne1-or$f[0].Sha256-cne$r.Sha256){throw 'DUPLICATE BLOCK: content revision'};$android+=@([pscustomobject]@{System=$r.System;RelativePath=$r.RelativePath;Sha256=$r.Sha256;Size=$f[0].Size;Kind='File';IsLink=$false})}
@@ -2945,7 +3097,7 @@ function Get-DuplicateProductionSnapshot([string]$Session) {
         if(Is-LocalOnlyRelativePath $r.RelativePath){continue}
         $path=Join-Path (Join-Path (Join-Path $SourceRoot 'roms') $r.System) $r.RelativePath.Replace('/','\')
         Assert-LocalSourcePath $path $SourceRoot
-        $sha=(Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant();if($sha-cne$r.Sha256){throw 'DUPLICATE BLOCK: managed source revision'}
+        $sha=(Get-PerfFileHash -LiteralPath $path).Hash.ToLowerInvariant();if($sha-cne$r.Sha256){throw 'DUPLICATE BLOCK: managed source revision'}
         $managed+=@([pscustomobject]@{System=$r.System;RelativePath=$r.RelativePath;Sha256=$sha;Size=(Get-Item -LiteralPath $path).Length;Kind='File';IsLink=$false})
     }
     $assets=Get-RenameAssetInventory;$xml=@{};$media=@{}
@@ -2958,8 +3110,11 @@ function Get-DuplicateProductionSnapshot([string]$Session) {
         $media[$system]=@(Get-RenameRemoteInventory ('/storage/emulated/0/ES-DE/downloaded_media/'+$system))
     }
     [pscustomobject]@{Android=$android;Managed=$managed;Assets=$assets;Xml=$xml;Media=$media;ManualNamespace=(Get-DuplicateManualNamespaceEvidence)}
+    } finally { Stop-PerfPhase $perfToken }
 }
 function New-DuplicateProductionRows($snapshot) {
+    $perfToken=Start-PerfPhase 'New-DuplicateProductionRows' '중복 안전성 분류'
+    try {
     $rows=@()
     foreach($source in @($snapshot.Android|Where-Object {$_.System-cin$selectedSystems-and$_.RelativePath.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal)-and-not@($_.RelativePath.Split('/')|Where-Object {$_-ieq'_TEST'}).Count})){
         $matched=@($snapshot.Managed|Where-Object {$_.System-ceq$source.System-and$_.Sha256-ceq$source.Sha256})
@@ -2989,6 +3144,7 @@ function New-DuplicateProductionRows($snapshot) {
         $rows+=$p
     }
     return $rows
+    } finally { Stop-PerfPhase $perfToken }
 }
 function Assert-DuplicateProductionEvidence($p,[object[]]$Completed,[bool]$XmlCommitted,[string]$Session) {
     if((Get-DuplicateProposalBinding $p)-cne$p.Binding){throw 'DUPLICATE BLOCK: plan binding changed'}
@@ -3014,7 +3170,7 @@ function New-DuplicateAdbAdapter($p,[string]$Session) {
     [pscustomobject]@{Mode='Adb';Asset=$asset
         AssertSafety={if(-not$script:DuplicateLifecycleStopped){throw 'DUPLICATE BLOCK: lifecycle gate not owned'};if((Invoke-PromotionShell 'if pidof com.retroarch.aarch64 >/dev/null; then printf RUNNING; else printf STOPPED; fi')-cne'STOPPED'){throw 'DUPLICATE BLOCK: game running'}}
         Stat={param($path)Read-DuplicateAndroidFile $path $p.System}.GetNewClosure()
-        Managed={param($proposal)$path=Join-Path (Join-Path (Join-Path $SourceRoot 'roms') $proposal.System) $proposal.CanonicalRelativePath.Replace('/','\');Assert-LocalSourcePath $path $SourceRoot;[pscustomobject]@{Exists=(Test-Path -LiteralPath $path -PathType Leaf);Kind='File';IsLink=$false;Size=(Get-Item -LiteralPath $path).Length;Sha256=(Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()}}
+        Managed={param($proposal)$path=Join-Path (Join-Path (Join-Path $SourceRoot 'roms') $proposal.System) $proposal.CanonicalRelativePath.Replace('/','\');Assert-LocalSourcePath $path $SourceRoot;[pscustomobject]@{Exists=(Test-Path -LiteralPath $path -PathType Leaf);Kind='File';IsLink=$false;Size=(Get-Item -LiteralPath $path).Length;Sha256=(Get-PerfFileHash -LiteralPath $path).Hash.ToLowerInvariant()}}
         DeleteExact={param($s,$c,$sha,$size)Invoke-DuplicateExactDeleteShell $s $c $sha $size $p.System}.GetNewClosure()
         Validate={param($proposal,$completed,$committed)Assert-DuplicateProductionEvidence $proposal $completed $committed $Session}.GetNewClosure()
         CommitXml={param($proposal)$plan=$proposal.Snapshot.Xml[$proposal.System].Plan;$output=Join-Path $Session ([guid]::NewGuid().ToString('N')+'.cleanup.xml');[void](Write-EsdeGamelist $proposal.PreparedXml $output);$plan.Output=$output;Sync-PromotionGamelist $plan}.GetNewClosure()
@@ -3144,6 +3300,8 @@ $esdeLifecycleStarted = $false
 $mediaContext=$null
 try {
     Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
+    Initialize-Perf $Operation
+    $initialPerfToken=Start-PerfPhase 'initialization' '원본과 기기 연결 확인'
     Write-Status "starting" "ADB 연결 확인 중..." 0 1
     Write-Log ("===== SELECTED-SYSTEM MIRROR START v" + $AppVersion.version + " =====")
     Write-Log ('ADB executable='+$AdbPath+' default WorkingDirectory='+$AdbWorkingDirectory)
@@ -3172,6 +3330,7 @@ try {
     Write-Log ("SELECTED SYSTEMS: " + ($selectedSystems -join ", "))
     Write-Log "SCOPE: selected system folders only; unselected systems are never deleted or modified"
 
+    Stop-PerfPhase $initialPerfToken
     if($Operation-cne'Sync'){Invoke-DuplicateWorkerOperation;exit 0}
     Assert-DuplicateRecoveryGate $StateDir
     $jobs = @()
@@ -3195,6 +3354,7 @@ try {
     $mediaJobs=@($jobs|Where-Object {$_.Bucket.Local-eq'downloaded_media'})
     $mediaContext=New-MediaContext $StateDir $SourceRoot $Serial
     $mediaSources=@(Get-MediaSourceFiles $mediaJobs $mediaContext)
+    $script:Perf.overall=20
     $classificationContext=$null
     $classificationSystems=@()
     foreach($system in $selectedSystems){
@@ -3218,12 +3378,14 @@ try {
             if($prepared.ClassificationPlan){$classificationPlans+=$prepared.ClassificationPlan}
             $gamelistPlans[$system]=$prepared.XmlPlan
         }
+        $script:Perf.overall=50
         # Flat media ownership와 local-only ROM의 연결은 미확정: 해당 system의 media 전체를 보존.
         $protectedMedia=@($classificationPlans|Where-Object ProtectMedia|ForEach-Object System)
         foreach($sys in $protectedMedia){Write-Log ('MEDIA LOCAL-ONLY PROTECT: '+$sys+' / relocation/flat naming policy unresolved, system media unchanged')}
         $activeMediaJobs=@($mediaJobs|Where-Object {$protectedMedia-cnotcontains$_.System})
         $activeMediaSources=@($mediaSources|Where-Object {$protectedMedia-cnotcontains$_.system})
         $mediaPlan=Prepare-MediaPlan $activeMediaJobs $activeMediaSources $mediaContext
+        $script:Perf.overall=70
         if(@($classificationPlans|Where-Object {$_.Promotions.Count}).Count){Invoke-ClassificationPromotions $classificationPlans $classificationContext $gamelistSession}
         else{Invoke-ClassificationMoves $classificationPlans $classificationContext $gamelistSession}
         # 적용 후 재수집: 이전 inventory의 extra delete 목록은 절대 재사용하지 않는다.
@@ -3263,6 +3425,9 @@ try {
         }
         $script:DuplicateInformationalCount=Get-DuplicateInformationalCount $classificationPlans
         $script:RomCompletionSummary=Get-PromotionSummaryProposal @($classificationPlans|ForEach-Object Inventory) ([int](($classificationPlans|Measure-Object CompletedPromotions -Sum).Sum))
+        Add-PerfCounter 'ManagedRomCount' $script:RomCompletionSummary.ManagedCount
+        Add-PerfCounter 'LocalOnlyRomCount' $script:RomCompletionSummary.LocalOnlyCount
+        Add-PerfCounter 'ReviewRomCount' $script:RomCompletionSummary.ReviewCount
         } finally {
             try {
                 $incomplete=@();try{if($classificationContext){[void](New-ClassificationContext $StateDir $SourceRoot $Serial)}}catch{$incomplete=@($_)}
@@ -3288,6 +3453,6 @@ catch {
 
 }
 finally {
-    try { if($mediaContext){Close-MediaSession $mediaContext} }
+    try { try{Write-PerfSummary}catch{try{Write-Log ('PERF REPORT FAILED: '+$_.Exception.Message)}catch{}}; if($mediaContext){Close-MediaSession $mediaContext} }
     finally { [Environment]::CurrentDirectory=$PreviousProcessDirectory; Exit-AppMutex $OperationMutex }
 }
