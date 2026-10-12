@@ -120,3 +120,27 @@ arguments를 캡처하고 실제 worker param block을 사용하는 별도 bindi
 Scan/Cleanup, 기존 positional sync, 공백·한글 경로, invalid operation/request/selection,
 stale scan, `_TEST` 및 traversal 방어를 검증한다. 실제 기기에서는 기존 fixture의
 DuplicateScan만 허용한다. GUI cleanup/일반 sync는 이 단계에서 실행하지 않는다.
+
+## Stage 3.4 cleanup callback 경로 binding
+
+Stage 3A 요청 `5165175bf76a48b892e55ac35363635c`는 journal 생성 전에 stale/review로
+종료됐다. SelectionFile은 `ids/schemaVersion/scanId/identity` DTO이며 path/requestId/SHA를
+중복 저장하지 않는다. worker는 scanId/source-device identity를 확인한 뒤 Id로 public row를
+찾고, refresh가 같은 Id의 최신 private proposal과 selection binding을 재검증한다.
+실제 source/canonical 필드는 `SourceRelativePath/CanonicalRelativePath`이다.
+절대 Android 경로는 system ROM root와 이 두 값을 조합한 delete evidence에서 파생된다.
+표시 문자열로 경로를 재구성하지 않는다. requestId는 요청/응답 상관관계 값이다.
+
+원인은 lifecycle callback 내부 `GetNewClosure()`가 상위 함수의 `$session`을 local 변수로
+캡처하지 못한 것이다. 빈 session이 refresh→Get-DuplicateProductionSnapshot→
+Prepare-GamelistSystem의 Join-Path에 전달됐다. 경로 필드 serialization 손실이 아니다.
+callback local `$cleanupSession`을 명시적으로 만들고 두 closure가 함께 캡처하게 한다.
+session 부재와 source/canonical 상대 경로 부재는 구체적인 오류로 fail-fast한다.
+기존 schema, StateDir, SHA, traversal, `_TEST`, recovery 및 selection binding은 유지한다.
+
+`tests/duplicate-path-binding-static.ps1`는 실제 worker 함수의 lifecycle/refresh/adapter
+호출 구조를 사용하되 transport와 batch를 pre-journal 관찰 backend로 치환한다.
+기존 closure 실패, Stage 3A 단일 ID, 두 ID/mixed grade, 공백·한글·괄호 path를 검증한다.
+실기기 재검증은 scan와 adapter의 읽기 전용 Validate/Stat/Managed만 실행하며
+AssertSafety의 lifecycle ownership을 위조하거나 ES-DE를 종료하지 않는다.
+실제 cleanup 재시도는 별도 승인 이후이며 version은 1.7.0이다.

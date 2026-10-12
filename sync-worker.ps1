@@ -2791,6 +2791,8 @@ function Set-DuplicateScopedXml($p,$Local) {
     $p.PreparedXml=$scoped;$p.Binding=Get-DuplicateProposalBinding $p
 }
 function Assert-DuplicateDeleteScope($p) {
+    if([string]::IsNullOrWhiteSpace([string]$p.SourceRelativePath)){throw 'DUPLICATE BLOCK: selection source path missing'}
+    if([string]::IsNullOrWhiteSpace([string]$p.CanonicalRelativePath)){throw 'DUPLICATE BLOCK: selection canonical path missing'}
     if($p.System-cnotin@('gb','gbc')-or$p.ExpectedSha256-cnotmatch'^[a-f0-9]{64}$'-or$p.SourceRelativePath-ceq$p.CanonicalRelativePath){throw 'DUPLICATE BLOCK: system/evidence/same path'}
     $info=Get-EsdeGamePathInfo $p.SourceRelativePath
     if($info.Class-cne'LocalUnregistered'-or$info.Key.Substring(2)-cne$p.SourceRelativePath-or-not$p.SourceRelativePath.StartsWith('_UNREGISTERED/',[StringComparison]::Ordinal)-or@($p.SourceRelativePath.Split('/')|Where-Object {$_-ieq'_TEST'}).Count){throw 'DUPLICATE BLOCK: reserved source scope'}
@@ -3080,8 +3082,11 @@ function Invoke-DuplicateWorkerOperation {
     Invoke-EsdeSync {
         $script:DuplicateLifecycleStopped=$true
         try{
-            $refresh={param($row)$fresh=@(New-DuplicateProductionRows (Get-DuplicateProductionSnapshot $session));$match=@($fresh|Where-Object Id -CEQ $row.Id);if($match.Count-ne1){throw 'DUPLICATE STALE: row vanished'};return $match[0]}.GetNewClosure()
-            $adapter={param($p)New-DuplicateAdbAdapter $p $session}.GetNewClosure()
+            # GetNewClosure captures local variables, not the caller's inherited session.
+            $cleanupSession=$session
+            if([string]::IsNullOrWhiteSpace($cleanupSession)){throw 'DUPLICATE BLOCK: cleanup evidence session missing'}
+            $refresh={param($row)$fresh=@(New-DuplicateProductionRows (Get-DuplicateProductionSnapshot $cleanupSession));$match=@($fresh|Where-Object Id -CEQ $row.Id);if($match.Count-ne1){throw 'DUPLICATE STALE: row vanished'};return $match[0]}.GetNewClosure()
+            $adapter={param($p)New-DuplicateAdbAdapter $p $cleanupSession}.GetNewClosure()
             $script:DuplicateBatchResult=Invoke-DuplicateCleanupBatch $picked $refresh $adapter $StateDir $identity $Serial
             $script:DuplicateBatchResult|Add-Member requestId $DuplicateRequestId
             Write-MediaJson (Join-Path $StateDir 'duplicate-result.json') $script:DuplicateBatchResult $StateDir
