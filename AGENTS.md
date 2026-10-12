@@ -1,4 +1,4 @@
-# Repository Guidelines
+﻿# Repository Guidelines
 
 ## 언어와 변경 원칙
 
@@ -6,7 +6,7 @@
 
 ## 구성과 실행 환경
 
-현재 개발 기준은 **v1.8 Stage 2 Duplicate Manager 개발** (stable 기준 v1.7.0, version.json=1.7.0 유지)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
+현재 개발 기준은 **v1.8.0 release candidate** (이전 stable v1.7.0)이며 `version.json`이 버전의 단일 원본이다. Windows 11과 Windows PowerShell 5.1 호환성을 유지하고 모든 PS1은 UTF-8 BOM으로 저장한다.
 
 - `ESDE-Sync.ps1`: Windows Forms GUI, ADB 및 worker 실행.
 - `sync-worker.ps1`: ROM mirror, foreground 검사, gamelist 병합, media ownership의 runtime 원본.

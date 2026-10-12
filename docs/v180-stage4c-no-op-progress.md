@@ -43,6 +43,6 @@ DuplicateScan GUI12,751ms(worker12,171ms), worker max silence2,117ms. 사용자 
 
 최종 SAFE2회 PASS, recovery gate 정상. ROM/XML/media/save45/state4/Dropbox14 inventory 동일, stable App8/State21 및 staging source1016 동일. trial App8/source 동일. transfer/delete/rename0, cleanup0. source/version1.7.0, main/tag/Release 변경 없음.
 
-Evidence: C:\Users\dhlim\AppData\Local\Temp\esde4c-gui-retest-20261012-200840
+Evidence: <로컬 격리 evidence 경로 비공개>
 
 최종 판정: v1.8 Stage 4C REAL-SYNC READY.

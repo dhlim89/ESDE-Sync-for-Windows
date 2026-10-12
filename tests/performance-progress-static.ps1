@@ -3,7 +3,7 @@ $repo=Split-Path -Parent $PSScriptRoot
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'sync-worker.ps1'),[ref]$null,[ref]$null)
 foreach($f in $ast.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$false)){. ([scriptblock]::Create($f.Extent.Text))}
 $root=Join-Path $env:TEMP ('esde-perf-'+[guid]::NewGuid().ToString('N'));[void][IO.Directory]::CreateDirectory($root)
-$StatusFile=Join-Path $root 'status.json';$StateDir=$root;$Operation='Sync';$AppVersion=@{version='1.7.0'};$Serial='fake';function Write-Log($m){}
+$StatusFile=Join-Path $root 'status.json';$StateDir=$root;$Operation='Sync';$AppVersion=Get-Content (Join-Path $repo 'version.json') -Raw -Encoding UTF8|ConvertFrom-Json;$Serial='fake';function Write-Log($m){}
 $passed=0;function Check($ok,$name){if(-not$ok){throw $name};$script:passed++;Write-Host ('PASS: '+$name)}
 Initialize-Perf 'fixture'
 $token=Start-PerfPhase 'inventory' '파일 목록 확인 중'

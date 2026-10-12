@@ -65,7 +65,7 @@ _TEST preserve, media hold/save-state Preserve, proposal I/O0 및 runtime 미연
 실제 save/state mapping/override, unknown metadata 정책, parent safety evidence contract가 다음 Stage blocker.
 실기기 시험/설치/Dropbox write/commit/push/tag/Release는 이번 Stage에서 하지 않는다.
 ## Stage 1.1 실기기 근거와 Stage 1.2 (2026-10-10)
-사용자 확인: Retroid 7b67d4e2 + RetroArch aarch64 + SameBoy의 V160_SAVE_TEST.gb를
+사용자 확인: Retroid <검증 기기 serial 비공개> + RetroArch aarch64 + SameBoy의 V160_SAVE_TEST.gb를
 _TEST에서 gb root로 옮긴 뒤 in-game save 및 savestate load 성공, duplicate save/state 없음.
 .srm/.rtc/.state는 RetroArch saves/SameBoy, states/SameBoy 아래 같은 basename 사용.
 이전 UNKNOWN 기록은 조사 당시 상태이며 현재 이 구성의 basename 유지/path 변경은 실기기 근거 확보.
@@ -117,7 +117,7 @@ production adapter(parent chain/same filesystem/no-clobber), 기존 move executo
 현 production local-only match는 여전히 PRESERVE_AND_REVIEW. _TEST 자동 승격 없음.
 ## Stage 1.3 production 연결 (실제 sync 미실행)
 version 1.5.0 유지, 미커밋 development tree에만 연결한다. 설치본/Release bytes는 변경하지 않는다.
-Get-PromotionEnvironmentEvidence는 gb/gbc + Retroid serial 7b67d4e2 + Stage1.1 config SHA
+Get-PromotionEnvironmentEvidence는 gb/gbc + Retroid serial <검증 기기 serial 비공개> + Stage1.1 config SHA
 b224183630dd375291bd67c605d31ce247dc3b7fe78aa4e2361cf82fd4fae111 + SameBoy system/game label + cfg override/link 없음에 제한.
 현재 config가 달라졌거나 다른 serial/core이면 REVIEW. core binary update/다른 vendor에 대한 검증은 별도 등록 필요.
 _TEST, 다른 이름/하위 경로, 다중 candidate는 기존 fallback; canonical ROM 존재는 기존 중복 cleanup 없이 REVIEW.
@@ -171,9 +171,9 @@ fixture NOT READY: 사용자 승인 후 시험 game path 수정과 fixture state
 승격이 승인된 canonical metadata만 기존 REVIEW master exclusion에서 제외하여 canonical node 1개/master metadata를 보장한다.
 다른 REVIEW의 ROM push suppression과 local-only whole-node 보호는 그대로 유지한다.
 ## Stage 1 실기기 완료 checkpoint
-Retroid Pocket Mini V2 / serial 7b67d4e2 / GB / RetroArch + SameBoy의 격리 시험 1회 PASS.
-Evidence root: C:\esde-v160-fixture-12a6c42a
-최종 증거: C:\esde-v160-fixture-12a6c42a\actual-promotion-20261010-132821\FINAL-PASS.json
+Retroid Pocket Mini V2 / serial <검증 기기 serial 비공개> / GB / RetroArch + SameBoy의 격리 시험 1회 PASS.
+Evidence root: <로컬 격리 evidence 경로 비공개>
+최종 증거: <로컬 격리 evidence 경로 비공개>
 fixture recovery 원본 및 history는 동일 root의 recovery-20261010-132311에 보존한다.
 위 NOT READY/recovery-needed 기록은 당시 중단 상태의 역사이며, 명시적 수동 검증 후 Trial gate를 해소했다.
 _UNREGISTERED/V160_SAVE_TEST.gb → V160_SAVE_TEST.gb internal move, SHA 동일, ROM USB push 0.

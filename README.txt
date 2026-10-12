@@ -1,4 +1,4 @@
-﻿ES-DE Sync for Android v1.7.0 Development
+﻿ES-DE Sync for Android v1.8.0 Development
 ======================================
 
 v1.8 Stage 4A: 성능 계측과 단계·처리 개수·파일명·경과 시간 표시 기반을 검증했습니다. 당시 최적화 전 baseline을 유지합니다. 설계: docs/v180-stage4a-performance-progress.md
@@ -399,10 +399,10 @@ Stable v1.6.0 기록과 위 v1.5/v1.6 정책 설명은 개발 이력입니다. �
 Android folder metadata는 promotion 유무와 무관하게 공통 gamelist merger에서 보존합니다.
 Android-only folder(_TEST/_UNREGISTERED 포함)는 whole-node 보존하며 같은 path는 master metadata base와 Android runtime tag-presence를 병합합니다. custom metadata 충돌/duplicate/invalid path는 임의 삭제하지 않고 차단합니다. ROM/game 정책과 version 1.7.0은 유지합니다.
 
-v1.8 Stage 2 개발 (version.json은 1.7.0 유지)
+v1.8.0 미등록 중복 ROM 관리
 - 미등록 중복 ROM 관리는 normal sync와 별도의 수동 기능입니다.
 - 중복 ROM 확인에서 목록을 검사하고 사용자가 체크한 안전한 항목만 처리합니다.
 - _TEST는 제외합니다. 저장 목적지 충돌, slot/autostate, 로컬 media, unsafe metadata는 검토 필요입니다.
 - 기존 runtime/folder metadata 정책과 저장 데이터 verified migration을 재사용합니다.
 - 실패 journal은 후속 정리 및 sync를 차단합니다. 자동 rollback/resume는 없습니다.
-- 현재 fake backend 회귀 단계이며 실제 기기 삭제는 Stage 3 격리 승인 후 검증합니다.
+- 격리 실기기에서 단일 SAFE_DELETE와 SAFE_MERGE_DELETE 및 migration 후 인게임 save/Save State load 검증을 완료했습니다.
