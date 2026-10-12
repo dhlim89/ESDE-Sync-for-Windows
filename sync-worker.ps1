@@ -65,6 +65,113 @@ function Write-Log([string]$Message) {
     }
 }
 
+function Initialize-InventorySession {
+    Close-InventorySession
+    $script:InventorySession=@{createdAt=[DateTime]::UtcNow.ToString('o');serial=$Serial;source=$SourceRoot;generation=[guid]::NewGuid().ToString('N');sourceHashes=@{};handles=(New-Object Collections.ArrayList)}
+}
+function Get-SourceHandleIdentity($Handle) {
+    if(-not('EsdeSourceIdentity' -as[type])){
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class EsdeSourceIdentity {
+ [StructLayout(LayoutKind.Sequential)] struct Info {
+  public uint attributes; public System.Runtime.InteropServices.ComTypes.FILETIME created,accessed,written;
+  public uint volume,sizeHigh,sizeLow,links,indexHigh,indexLow;
+ }
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle h,out Info i);
+ public static string Read(SafeFileHandle h) {Info i;if(!GetFileInformationByHandle(h,out i)||(i.indexHigh==0&&i.indexLow==0))return null;return i.volume+":"+i.indexHigh+":"+i.indexLow;}
+}
+'@
+    }
+    return [EsdeSourceIdentity]::Read($Handle.SafeFileHandle)
+}
+function Close-InventorySession {
+    if($script:InventorySession){foreach($handle in $script:InventorySession.handles){$handle.Dispose()}}
+    $script:InventorySession=$null
+}
+function Test-InventorySession {
+    if(-not$script:InventorySession){return $false}
+    if($script:InventorySession.serial-cne$Serial-or$script:InventorySession.source-cne$SourceRoot){Close-InventorySession;return $false}
+    return $true
+}
+function ConvertFrom-BatchFileStats([string]$Text,[string]$Root) {
+    $rows=@();$seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($line in @($Text-split'\r?\n'|Where-Object {$_})){
+        if($line-cnotmatch'^([0-9]+)\t([0-9]+)\t([a-fA-F0-9]+)\t([0-9]+)\t([0-9]+)\t(.+)$'){throw 'BATCH BLOCK: stat format'}
+        $size=[long]$Matches[1];$mtime=[long]$Matches[2];$mode=[Convert]::ToInt32($Matches[3],16);$device=$Matches[4];$inode=$Matches[5];$path=$Matches[6]
+        if(($mode-band61440)-ne32768-or-not$path.StartsWith($Root+'/',[StringComparison]::Ordinal)){throw 'BATCH BLOCK: non-file or root escape'}
+        $relative=$path.Substring($Root.Length+1);$info=Get-EsdeGamePathInfo $relative
+        if($info.Class-ceq'Invalid'-or$info.Key.Substring(2)-cne$relative-or-not$seen.Add($relative)){throw 'BATCH BLOCK: path/duplicate'}
+        $rows+=[pscustomobject]@{RelativePath=$relative;Size=$size;Mtime=$mtime;Device=$device;Inode=$inode;Kind='File';IsLink=$false}
+    }
+    return @($rows|Sort-Object RelativePath)
+}
+function ConvertFrom-BatchFileHashes([string]$Text,[string]$Root,[object[]]$Expected) {
+    $map=New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach($line in @($Text-split'\r?\n'|Where-Object {$_})){
+        if($line-cnotmatch'^([a-fA-F0-9]{64})  (.+)$'){throw 'BATCH BLOCK: SHA format'}
+        $hash=$Matches[1].ToLowerInvariant();$path=$Matches[2]
+        if(-not$path.StartsWith($Root+'/',[StringComparison]::Ordinal)){throw 'BATCH BLOCK: SHA root escape'}
+        $key=$path.Substring($Root.Length+1)
+        if($map.ContainsKey($key)){throw 'BATCH BLOCK: duplicate SHA path'}
+        $map.Add($key,$hash)
+    }
+    if($map.Count-ne$Expected.Count){throw 'BATCH BLOCK: partial SHA inventory'}
+    foreach($row in $Expected){if(-not$map.ContainsKey($row.RelativePath)){throw 'BATCH BLOCK: SHA path binding'}}
+    return ,$map
+}
+function Get-AndroidBatchInventory([string]$Root,[switch]$ExcludeTest,[switch]$ExcludeReserved,[string[]]$HashPaths=$null,[ValidateSet('All','ClassificationRom')][string]$HashPolicy='All') {
+    $batchPerf=Start-PerfPhase ('batch_inventory:'+ $Root) 'Android 파일 목록·SHA 확인'
+    try {
+    if($Root-cnotin@('/storage/emulated/0/ROMs','/storage/emulated/0/RetroArch/saves','/storage/emulated/0/RetroArch/states')-and$Root-cnotmatch'^/storage/emulated/0/(ROMs|ES-DE/downloaded_media)/(gb|gbc)$'){throw 'BATCH BLOCK: root scope'}
+    if($Root-cmatch'^/storage/emulated/0/(ROMs|ES-DE/downloaded_media)/(gb|gbc)$'){Assert-RemotePath ($Root+'/scope-probe')}
+    $q=Quote-Sh $Root;$prune=if($ExcludeReserved){' \( -iname _TEST -o -iname _UNREGISTERED \) -prune -o'}elseif($ExcludeTest){' -iname _TEST -prune -o'}else{''}
+    $parents=$Root.Split('/');$checks=@();for($i=4;$i-lt$parents.Length;$i++){$checks+=('[ ! -L '+(Quote-Sh ($parents[0..$i]-join'/'))+' ] || exit 1')}
+    $guard=($checks-join'; ')+'; '
+    $kind=Invoke-PromotionShell ($guard+'if [ -d '+$q+' ]; then printf DIR; elif [ -e '+$q+' ]; then exit 1; else printf ABSENT; fi')
+    if($kind-ceq'ABSENT'){return [pscustomobject]@{Root=$Root;Rows=@();HashMap=@{};Absent=$true;createdAt=[DateTime]::UtcNow.ToString('o');generation=[guid]::NewGuid().ToString('N')}}
+    if($kind-cne'DIR'){throw 'BATCH BLOCK: root type'}
+    if((Invoke-PromotionShell ('readlink -f '+$q)).TrimEnd([char]13,[char]10)-cne$Root){throw 'BATCH BLOCK: root redirect'}
+    if(Invoke-PromotionShell ('find '+$q+$prune+' -type l -print')){throw 'BATCH BLOCK: symlink inventory'}
+    $format='%s'+[char]9+'%Y'+[char]9+'%f'+[char]9+'%d'+[char]9+'%i'+[char]9+'%n'
+    $statCommand=$guard+'find '+$q+$prune+' -type f -exec stat -c '+(Quote-Sh $format)+' {} +'
+    $before=@(ConvertFrom-BatchFileStats (Invoke-PromotionShell $statCommand) $Root)
+    foreach($row in $before){if(($ExcludeTest-and@($row.RelativePath.Split('/')|Where-Object {$_-ieq'_TEST'}).Count)-or($ExcludeReserved-and(Is-LocalOnlyRelativePath $row.RelativePath))){throw 'BATCH BLOCK: reserved path escaped prune'}}
+    $wanted=@(if($null-eq$HashPaths){$before}else{$before|Where-Object {$HashPaths-ccontains$_.RelativePath}})
+    if($HashPolicy-ceq'ClassificationRom'){
+        $system=$Root.Substring($Root.LastIndexOf('/')+1)
+        $wanted=@($wanted|Where-Object {if(Is-LocalOnlyRelativePath $_.RelativePath){[IO.Path]::GetExtension($_.RelativePath).ToLowerInvariant()-cin(Get-ClassificationExtensions $system)}else{-not(Is-ClassificationAuxiliaryPath $_.RelativePath)}})
+    }
+    $hashes=New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    Set-PerfWork 0 $wanted.Count $Root
+    for($offset=0;$offset-lt$wanted.Count;){
+        $end=$offset;$length=0
+        while($end-lt$wanted.Count-and$end-$offset-lt1000){$next=(Quote-Sh ($Root+'/'+$wanted[$end].RelativePath)).Length+1;if($end-gt$offset-and$length+$next-gt12000){break};$length+=$next;$end++}
+        $chunk=@($wanted[$offset..($end-1)]);$arguments=($chunk|ForEach-Object {Quote-Sh ($Root+'/'+$_.RelativePath)}) -join ' '
+        $reply=Invoke-Adb -s $Serial shell ($guard+'sha256sum '+$arguments)
+        if($reply.Code-eq127-and-not$reply.StdOut){$reply=Invoke-Adb -s $Serial shell ($guard+'toybox sha256sum '+$arguments)}
+        if($reply.Code-eq127-and-not$reply.StdOut){
+            # Capability fallback only; missing/permission/partial-result failures never fall through.
+            foreach($row in $chunk){
+                $temporary=[IO.Path]::GetTempFileName()
+                try{$pulled=Invoke-Adb -s $Serial pull ($Root+'/'+$row.RelativePath) $temporary;if($pulled.Code-ne0-or$pulled.StdErr-or(Get-Item -LiteralPath $temporary).Length-ne$row.Size){throw 'BATCH BLOCK: pull fallback'};$hashes.Add($row.RelativePath,(Get-PerfFileHash -LiteralPath $temporary).Hash.ToLowerInvariant())}
+                finally{[IO.File]::Delete($temporary)}
+            }
+            $offset=$end;continue
+        }
+        if($reply.Code-ne0-or$reply.StdErr){throw 'BATCH BLOCK: SHA command failure'}
+        $part=ConvertFrom-BatchFileHashes $reply.StdOut $Root $chunk;foreach($key in $part.Keys){$hashes.Add($key,$part[$key])}
+        $offset=$end
+        Set-PerfWork $offset $wanted.Count $Root
+    }
+    $after=@(ConvertFrom-BatchFileStats (Invoke-PromotionShell $statCommand) $Root)
+    if((ConvertTo-Json -InputObject @($before) -Compress)-cne(ConvertTo-Json -InputObject @($after) -Compress)){throw 'BATCH BLOCK: changed after inventory'}
+    return [pscustomobject]@{Root=$Root;Rows=$before;HashMap=$hashes;Absent=$false;createdAt=[DateTime]::UtcNow.ToString('o');generation=[guid]::NewGuid().ToString('N');rootFingerprint=(Get-MediaTextHash (ConvertTo-Json -InputObject @{Rows=@($before);Hashes=$hashes} -Compress))}
+    } finally { Stop-PerfPhase $batchPerf }
+}
+
 function Initialize-Perf([string]$Scenario='Sync') {
     $script:Perf=@{scenario=$Scenario;startedUtc=[DateTime]::UtcNow.ToString('o');clock=[Diagnostics.Stopwatch]::StartNew();counters=@{};phases=(New-Object Collections.ArrayList);stack=(New-Object Collections.ArrayList);overall=0;lastWriteMs=-500;maxSilenceMs=0;writes=0;writeMs=0;phase='initialization';label='준비 중';current=0;total=0;item=''}
     foreach($name in @('TotalAdbCalls','AdbShellCalls','AdbPushCalls','AdbPullCalls','AdbStatCalls','AdbHashCalls','AdbMoveCalls','AdbDeleteCalls','TotalHashCount','SourceRomHashCount','AndroidRomHashCount','SourceMediaHashCount','SourceMediaStagingHashCount','AndroidMediaHashCount','SaveStateHashCount','MutationRevalidationHashCount','ProgressWriteFailures')){$script:Perf.counters[$name]=0}
@@ -120,13 +227,28 @@ function Write-PerfProgress([switch]$Force) {
 }
 function Get-PerfFileHash {
     param([Parameter(Position=0)][string]$Path,[string]$LiteralPath,[string]$Algorithm='SHA256')
+    $memoKey=$null
+    if($LiteralPath-and$Algorithm-ceq'SHA256'-and(Test-InventorySession)-and$LiteralPath.StartsWith($SourceRoot.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)-and-not@(Get-PSCallStack|Where-Object {$_.FunctionName-match'^(Invoke-Verified|Get-AndroidBatchInventory|Read-ClassificationRom|Get-MediaRemoteHash|Get-DuplicateDeleteEvidence|Assert-DuplicateProductionEvidence|Assert-PromotionEvidence|Send-ClassifiedManagedFile|Set-MediaRemoteFile|Invoke-MediaTransaction)'}).Count){
+        $info=Get-Item -LiteralPath $LiteralPath -Force
+        Assert-LocalSourcePath $info.FullName $SourceRoot ([long]$info.Attributes)
+        # A fingerprint alone is insufficient: keep a read-only, deny-write/delete handle.
+        $handle=New-Object IO.FileStream($info.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        try{$identity=Get-SourceHandleIdentity $handle}catch{$identity=$null}
+        if($identity){
+            $memoKey=$info.FullName+'|'+$identity+'|'+$info.Length+'|'+$info.LastWriteTimeUtc.Ticks
+            if($script:InventorySession.sourceHashes.ContainsKey($memoKey)){$handle.Dispose();Add-PerfCounter 'SourceHashMemoHits';return $script:InventorySession.sourceHashes[$memoKey]}
+            [void]$script:InventorySession.handles.Add($handle)
+        }else{$handle.Dispose();Add-PerfCounter 'SourceMemoIdentityFallback'}
+    }
     Add-PerfCounter 'TotalHashCount';Add-PerfCounter 'LocalFileHashCount'
     Add-PerfMutationHash 1
     $name=if($LiteralPath){$LiteralPath}else{$Path}
     $callers=if($null-ne$script:Perf){@(Get-PSCallStack|Select-Object -ExpandProperty FunctionName)}else{@()}
     $category=if($callers-ccontains'Read-ClassificationRom'){'AndroidRomHashCount'}elseif($callers-ccontains'Get-MediaRemoteHash'){'AndroidMediaHashCount'}elseif($callers-ccontains'Get-MediaSourceFiles'-and$name.EndsWith('.source')){'SourceMediaStagingHashCount'}elseif($name-match'[/\\]roms[/\\]'){'SourceRomHashCount'}elseif($name-match'[/\\]downloaded_media[/\\]'){'SourceMediaHashCount'}elseif($name-match'\.(srm|rtc|state)$'){'SaveStateHashCount'}else{'OtherFileHashCount'}
     Add-PerfCounter $category
-    if($LiteralPath){Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm}else{Get-FileHash -Path $Path -Algorithm $Algorithm}
+    $hash=if($LiteralPath){Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm}else{Get-FileHash -Path $Path -Algorithm $Algorithm}
+    if($memoKey){$script:InventorySession.sourceHashes[$memoKey]=$hash}
+    return $hash
 }
 function Write-PerfSummary {
     if($null-eq$script:Perf){return}
@@ -165,6 +287,7 @@ function Invoke-Adb {
     Add-PerfCounter 'TotalAdbCalls'
     foreach($kind in @('shell','push','pull')){if($Args-ccontains$kind){Add-PerfCounter ('Adb'+(Get-Culture).TextInfo.ToTitleCase($kind)+'Calls')}}
     $command=$Args -join ' '
+    if(($Args-ccontains'push'-or$command-match'\b(mv|rm)\b')-and$script:InventorySession){Initialize-InventorySession;Add-PerfCounter 'InventoryInvalidations'}
     foreach($entry in @(@('AdbStatCalls','\bstat\b'),@('AdbHashCalls','sha256sum'),@('AdbMoveCalls','\bmv\b'),@('AdbDeleteCalls','\brm\b'))){if($command-match$entry[1]){Add-PerfCounter $entry[0]}}
     Write-PerfProgress
 
@@ -1476,6 +1599,13 @@ function Assert-RenameFileCase([string]$Path) {
 function Get-RenameRemoteInventory([string]$Root,[switch]$ExcludeTest) {
     $perfToken=Start-PerfPhase ('remote_inventory:'+ $Root) 'Android 파일 SHA 목록 확인'
     try {
+    if(Test-InventorySession){
+        $batch=Get-AndroidBatchInventory $Root -ExcludeTest:$ExcludeTest
+        if($batch.Absent){throw 'RENAME REVIEW: inventory directory/link unknown'}
+        $case=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach($row in $batch.Rows){if(-not$case.Add($row.RelativePath)){throw 'RENAME BLOCK: inventory path/duplicate/case'};[pscustomobject]@{RelativePath=$row.RelativePath;Size=$row.Size;Sha256=$batch.HashMap[$row.RelativePath];Kind='File';IsLink=$false}}
+        return
+    }
     if($Root-cnotin@('/storage/emulated/0/RetroArch/saves','/storage/emulated/0/RetroArch/states','/storage/emulated/0/ROMs','/storage/emulated/0/ES-DE/downloaded_media/gb','/storage/emulated/0/ES-DE/downloaded_media/gbc')){throw 'RENAME BLOCK: inventory root'}
     $q=Quote-Sh $Root
     $kind=Invoke-PromotionShell ('if [ -L '+$q+' ]; then printf LINK; elif [ -d '+$q+' ]; then printf DIR; elif [ -e '+$q+' ]; then printf OTHER; else printf ABSENT; fi')
@@ -1523,7 +1653,8 @@ function Get-RenameContentPathEvidence([string]$RelativePath,[string]$Sha256) {
 }
 function Get-RenameContentEvidence([switch]$DuplicateManager) {
     $android=@();$managed=@()
-    foreach($row in @(Get-RenameRemoteInventory '/storage/emulated/0/ROMs' -ExcludeTest:$DuplicateManager)){
+    $inventory=@(Get-RenameRemoteInventory '/storage/emulated/0/ROMs' -ExcludeTest:$DuplicateManager)
+    foreach($row in $inventory){
         $content=Get-RenameContentPathEvidence $row.RelativePath $row.Sha256
         if($content){$android+=$content}
     }
@@ -1539,7 +1670,7 @@ function Get-RenameContentEvidence([switch]$DuplicateManager) {
             if($content){$managed+=$content}
         }
     }
-    return [pscustomobject]@{Android=$android;Managed=$managed}
+    return [pscustomobject]@{Android=$android;Managed=$managed;InventoryRows=$inventory}
 }
 function Get-RenameProductionSnapshot([string]$System) {
     $assets=Get-RenameAssetInventory;$content=Get-RenameContentEvidence
@@ -2013,6 +2144,17 @@ function Get-ClassificationAndroidRows($Job,[string]$Session,[switch]$IncludeLoc
     $perfToken=Start-PerfPhase 'Get-ClassificationAndroidRows' 'Android ROM SHA 확인'
     try {
     Assert-ClassificationRemoteLinks $Job.RemotePath
+    if(Test-InventorySession){
+        $batch=Get-AndroidBatchInventory $Job.RemotePath -ExcludeReserved:(-not$IncludeLocalOnly) -HashPolicy ClassificationRom
+        Add-PerfCounter 'AndroidRomCount' $batch.Rows.Count
+        foreach($row in $batch.Rows){
+            $relative=$row.RelativePath
+            if(Is-LocalOnlyRelativePath $relative){if([IO.Path]::GetExtension($relative).ToLowerInvariant()-cnotin(Get-ClassificationExtensions $Job.System)){continue}}
+            elseif(Is-ClassificationAuxiliaryPath $relative){Write-Log ('ROM PRESERVE AUXILIARY: '+$Job.System+'/'+$relative);continue}
+            [pscustomobject]@{RelativePath=$relative;Sha256=$batch.HashMap[$relative]}
+        }
+        return
+    }
     $paths=@()
     if($IncludeLocalOnly){
         # 준비 단계의 단일 read-only 분류 inventory만 완전하게 수집한다.
@@ -2070,7 +2212,12 @@ function Prepare-ClassificationSystem($RomJob,$XmlJob,$XmlPlan,[string]$Session)
     $android=@(Get-ClassificationAndroidRows $RomJob $Session -IncludeLocalOnly)
     $destinations=@()
     foreach($row in @($android|Where-Object {-not(Is-LocalOnlyRelativePath $_.RelativePath)})){
-        $destination=Read-ClassificationRom ($RomJob.RemotePath+'/_UNREGISTERED/'+$row.RelativePath) $Session
+        if(Test-InventorySession){
+            $key='_UNREGISTERED/'+$row.RelativePath
+            foreach($found in @($android|Where-Object RelativePath -CEQ $key)){$destinations+=[pscustomobject]@{RelativePath=$key;Sha256=$found.Sha256}}
+            continue
+        }
+        $destination=Read-ClassificationRom ($RomJob.RemotePath+'/_UNREGISTERED/'+$row.RelativePath) $Session -PlanningOnly
         if($destination){$destinations+=[pscustomobject]@{RelativePath=('_UNREGISTERED/'+$row.RelativePath);Sha256=$destination.Sha256}}
     }
     $classification=@(New-UnregisteredClassificationPlan $RomJob.System $source $android $destinations $selectedSystems)
@@ -2303,7 +2450,7 @@ function Send-ClassifiedManagedFile($Row,[string]$Remote,[string]$Session,[scrip
     return $r
 }
 
-function Read-ClassificationRom([string]$Path,[string]$Session) {
+function Read-ClassificationRom([string]$Path,[string]$Session,[switch]$PlanningOnly) {
     Assert-RemotePath $Path
     if(-not$Path.StartsWith('/storage/emulated/0/ROMs/')){throw 'classification ROM root 오류'}
     $parts=$Path.Split('/')
@@ -2324,6 +2471,7 @@ function Read-ClassificationRom([string]$Path,[string]$Session) {
             $nativeHash=$matches[1].ToLowerInvariant();$method=$hashCommand.Trim();break
         }
     }
+    if($PlanningOnly-and$nativeHash){return [pscustomobject]@{Path=$Path;File=$null;Sha256=$nativeHash;HashMethod=$method}}
     # native/toybox가 없으면 pull SHA를 사용하며, 지원되면 실제 Android SHA와 비교한다.
     $file=Join-Path $Session ([guid]::NewGuid().ToString('N')+'.rom')
     $r=Invoke-Adb -s $Serial pull $Path $file
@@ -2604,11 +2752,10 @@ function Get-MediaSourceFiles($Jobs,$Context) {
             Set-PerfWork (++$perfIndex) $perfItems.Count ($job.System+'/'+$item.Name)
             $relative=Get-MediaRelativePath ($item.FullName.Substring($job.LocalPath.Length).TrimStart('\','/'))
             [void](Get-MediaRemotePath $job.System $relative)
-            $copy=Join-Path $Context.Session ([guid]::NewGuid().ToString('N')+'.source')
             $hash=(Get-PerfFileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            Copy-Item -LiteralPath $item.FullName -Destination $copy
-            if((Get-PerfFileHash -LiteralPath $copy).Hash-ine$hash){throw 'media 원본이 준비 중 변경됨'}
-            $files+=[pscustomobject]@{system=$job.System;relativePath=$relative;hash=$hash;size=(Get-Item -LiteralPath $copy).Length;path=$copy}
+            $sourcePath=$item.FullName
+            if(-not(Test-InventorySession)){$sourcePath=Join-Path $Context.Session ([guid]::NewGuid().ToString('N')+'.source');Copy-Item -LiteralPath $item.FullName -Destination $sourcePath;if((Get-PerfFileHash -LiteralPath $sourcePath).Hash-ine$hash){throw 'media 원본이 준비 중 변경됨'}}
+            $files+=[pscustomobject]@{system=$job.System;relativePath=$relative;hash=$hash;size=(Get-Item -LiteralPath $sourcePath).Length;path=$sourcePath}
         }
         } finally { Stop-PerfPhase $mediaJobPerf }
     }
@@ -2652,7 +2799,10 @@ function Prepare-MediaPlan($Jobs,$Sources,$Context) {
     foreach($job in $Jobs){
         Assert-RemotePath $job.RemotePath
         if($job.RemotePath-cne('/storage/emulated/0/ES-DE/downloaded_media/'+$job.System)){throw 'media job 범위 오류'}
-        $remote=@(Get-RemoteFiles $job.RemotePath);[void]@(Get-RemoteDirs $job.RemotePath)
+        $paths=@(@($Sources|Where-Object system -ceq $job.System|ForEach-Object relativePath)+@($Context.Manifest.entries|Where-Object system -ceq $job.System|ForEach-Object relativePath)|Sort-Object -Unique -CaseSensitive)
+        $batch=$null
+        if((Test-InventorySession)-and$job.System-cin@('gb','gbc')){$batch=Get-AndroidBatchInventory $job.RemotePath -ExcludeReserved -HashPaths $paths;$remote=@($batch.Rows|ForEach-Object RelativePath)}
+        else{$remote=@(Get-RemoteFiles $job.RemotePath);[void]@(Get-RemoteDirs $job.RemotePath)}
         Add-PerfCounter 'AndroidMediaCount' $remote.Count
         foreach($relative in $remote){if(-not$sourceMap.ContainsKey($job.System+'/'+$relative) -and -not$entries.ContainsKey($job.System+'/'+$relative)){$summary++}}
         $paths=@(@($Sources|Where-Object system -ceq $job.System|ForEach-Object relativePath)+@($Context.Manifest.entries|Where-Object system -ceq $job.System|ForEach-Object relativePath)|Sort-Object -Unique -CaseSensitive)
@@ -2661,7 +2811,7 @@ function Prepare-MediaPlan($Jobs,$Sources,$Context) {
         foreach($relative in $paths){
             Set-PerfWork (++$perfIndex) $paths.Count ($job.System+'/'+$relative)
             $key=$job.System+'/'+$relative;$path=Get-MediaRemotePath $job.System $relative
-            $current=Get-MediaRemoteHash $path $Context.Session
+            $current=if($batch){if($batch.HashMap.ContainsKey($relative)){$batch.HashMap[$relative]}else{$null}}else{Get-MediaRemoteHash $path $Context.Session}
             $source=if($sourceMap.ContainsKey($key)){$sourceMap[$key]}else{$null}
             $entry=if($entries.ContainsKey($key)){$entries[$key]}else{$null}
             $kind=''
@@ -2672,6 +2822,13 @@ function Prepare-MediaPlan($Jobs,$Sources,$Context) {
                 elseif($current-cne$source.hash){$kind='update'}
                 else{$kind='verify'}
             }elseif($entry){$kind=if($current){'delete'}else{'forget'}}
+            if((Test-InventorySession)-and$kind-cin@('create','update')){
+                # Only files actually scheduled for transfer need immutable staging bytes.
+                $staged=Join-Path $Context.Session ([guid]::NewGuid().ToString('N')+'.source')
+                Copy-Item -LiteralPath $source.path -Destination $staged
+                if((Get-PerfFileHash -LiteralPath $staged).Hash-ine$source.hash){throw 'media 원본이 준비 중 변경됨'}
+                $source=$source.PSObject.Copy();$source.path=$staged
+            }
             if($kind){$operations+=[pscustomobject]@{kind=$kind;system=$job.System;relativePath=$relative;remote=$path;oldHash=$current;newHash=$(if($source){$source.hash}else{$null});source=$source;backup=$null;attempted=$false;commitAttempted=$false}}
         }
     }
@@ -3091,7 +3248,7 @@ function Get-DuplicateProductionSnapshot([string]$Session) {
     $perfToken=Start-PerfPhase 'Get-DuplicateProductionSnapshot' '중복 검사 자료 수집'
     try {
     $content=Get-RenameContentEvidence -DuplicateManager
-    $files=@(Get-RenameRemoteInventory '/storage/emulated/0/ROMs' -ExcludeTest)
+    $files=if($content.PSObject.Properties['InventoryRows']){Add-PerfCounter 'SnapshotInventoryReuseHits';@($content.InventoryRows)}else{@(Get-RenameRemoteInventory '/storage/emulated/0/ROMs' -ExcludeTest)}
     $android=@();foreach($r in $content.Android){$f=@($files|Where-Object RelativePath -CEQ ($r.System+'/'+$r.RelativePath));if($f.Count-ne1-or$f[0].Sha256-cne$r.Sha256){throw 'DUPLICATE BLOCK: content revision'};$android+=@([pscustomobject]@{System=$r.System;RelativePath=$r.RelativePath;Sha256=$r.Sha256;Size=$f[0].Size;Kind='File';IsLink=$false})}
     $managed=@();foreach($r in $content.Managed){
         if(Is-LocalOnlyRelativePath $r.RelativePath){continue}
@@ -3301,6 +3458,7 @@ $mediaContext=$null
 try {
     Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
     Initialize-Perf $Operation
+    Initialize-InventorySession
     $initialPerfToken=Start-PerfPhase 'initialization' '원본과 기기 연결 확인'
     Write-Status "starting" "ADB 연결 확인 중..." 0 1
     Write-Log ("===== SELECTED-SYSTEM MIRROR START v" + $AppVersion.version + " =====")
@@ -3453,6 +3611,6 @@ catch {
 
 }
 finally {
-    try { try{Write-PerfSummary}catch{try{Write-Log ('PERF REPORT FAILED: '+$_.Exception.Message)}catch{}}; if($mediaContext){Close-MediaSession $mediaContext} }
+    try { if($script:InventorySession){Close-InventorySession}; try{Write-PerfSummary}catch{try{Write-Log ('PERF REPORT FAILED: '+$_.Exception.Message)}catch{}}; if($mediaContext){Close-MediaSession $mediaContext} }
     finally { [Environment]::CurrentDirectory=$PreviousProcessDirectory; Exit-AppMutex $OperationMutex }
 }

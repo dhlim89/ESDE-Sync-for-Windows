@@ -19,6 +19,7 @@ $AppVersion=Get-AppVersion (Join-Path $repo 'version.json');$Operation='Sync';$S
 [void][IO.Directory]::CreateDirectory($Evidence);$StatusFile=Join-Path $Evidence 'status.json';$LogFile=Join-Path $Evidence 'profile.log'
 Assert-DuplicateRecoveryGate $TrialState
 Initialize-Perf 'unchanged-readonly-normal-preflight'
+Initialize-InventorySession
 $git=@(Get-ChildItem $env:TEMP -Directory -Filter 'esde-baseline-git-*'|ForEach-Object {Join-Path $_.FullName 'git/cmd/git.exe'}|Where-Object {Test-Path -LiteralPath $_}|Select-Object -First 1)[0]
 $checkpoint=& $git -C $repo rev-parse HEAD
 $implementation=(Get-FileHash -LiteralPath (Join-Path $repo 'sync-worker.ps1')).Hash.ToLowerInvariant()
@@ -42,13 +43,15 @@ try {
     Add-PerfCounter 'ReviewRomCount' $summary.ReviewCount
     @{Summary=$summary;HeldMediaSystems=$held;Moves=@($plans|ForEach-Object Moves).Count;Promotions=@($plans|ForEach-Object Promotions).Count;MediaKinds=@($mediaPlan.Operations|Group-Object kind|Select-Object Name,Count);ActualMutation=0;SyncExecuted=$false}|ConvertTo-Json -Depth 12|Set-Content (Join-Path $Evidence 'plan.json') -Encoding UTF8
     Write-Status 'done' '읽기 전용 baseline 완료' 1 1 $summary
-} finally {Write-PerfSummary;if($mediaContext){Close-MediaSession $mediaContext}}
+} finally {Close-InventorySession;Write-PerfSummary;if($mediaContext){Close-MediaSession $mediaContext}}
 Copy-Item (Join-Path $Evidence 'performance-baseline.json') (Join-Path $Evidence 'normal-performance.json')
 Initialize-Perf 'DuplicateScan-readonly'
+Initialize-InventorySession
 $script:Perf.gitCheckpoint=$checkpoint;$script:Perf.implementationSha256=$implementation
 $snapshot=Get-DuplicateProductionSnapshot $Evidence;$rows=@(New-DuplicateProductionRows $snapshot)
 Add-PerfCounter 'DuplicateCandidateCount' $rows.Count
 $rows|Select-Object Id,Grade|ConvertTo-Json|Set-Content (Join-Path $Evidence 'duplicate-rows.json') -Encoding UTF8
 Write-Status 'done' '중복 baseline 완료' 1 1
 Write-PerfSummary
+Close-InventorySession
 Copy-Item (Join-Path $Evidence 'performance-baseline.json') (Join-Path $Evidence 'duplicate-performance.json')

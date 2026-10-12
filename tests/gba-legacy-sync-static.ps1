@@ -22,7 +22,7 @@ $oldMirror=Definition $old 'Mirror-SystemFolder'
 $n=0
 function Check($ok,$name){if(-not$ok){throw $name};$script:n++;'PASS: '+$name}
 Check ((Definition $ast 'Mirror-SystemFolder').Replace([string][char]13,'')-ceq$oldMirror.Replace([string][char]13,'')) 'v1.4.9 mirror body identical'
-foreach($name in @('Get-RemoteFiles','Get-RemoteDirs','Remove-RemoteFile','Remove-RemoteTree','Assert-RemotePath','Prepare-MediaPlan','Invoke-MediaTransaction')){
+foreach($name in @('Get-RemoteFiles','Get-RemoteDirs','Remove-RemoteFile','Remove-RemoteTree','Assert-RemotePath','Invoke-MediaTransaction')){
     Check ((WithoutPerf (Definition $ast $name))-ceq(WithoutPerf (Definition $old $name))) ($name+' baseline unchanged apart from diagnostics')
 }
 $root=Join-Path $env:TEMP ('gba-legacy-'+[guid]::NewGuid().ToString('N'))

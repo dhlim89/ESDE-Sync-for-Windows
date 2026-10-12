@@ -1,7 +1,8 @@
 ﻿ES-DE Sync for Android v1.7.0 Development
 ======================================
 
-v1.8 Stage 4A 개발: 성능 계측과 단계·처리 개수·파일명·경과 시간 표시를 추가합니다. 안전 정책과 version 1.7.0은 유지하며 batch/selective SHA 최적화는 아직 적용하지 않습니다. 설계: docs/v180-stage4a-performance-progress.md
+v1.8 Stage 4A: 성능 계측과 단계·처리 개수·파일명·경과 시간 표시 기반을 검증했습니다. 당시 최적화 전 baseline을 유지합니다. 설계: docs/v180-stage4a-performance-progress.md
+v1.8 Stage 4B 개발: Android batch inventory/SHA, 필요한 media staging, guard 기반 session SHA memo와 중복 snapshot 재사용을 적용합니다. mtime-only 판단·persistent cache·병렬 전송은 사용하지 않습니다. 설계: docs/v180-stage4b-inventory-hashing.md
 
 프로그램
 --------
